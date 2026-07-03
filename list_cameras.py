@@ -4,7 +4,7 @@ import time
 INDEX_TO_TEST = 0
 
 cap = cv2.VideoCapture(INDEX_TO_TEST)
-time.sleep(1)  # kasih waktu kamera siap-siap
+time.sleep(1) 
 
 if not cap.isOpened():
     print("Kamera tidak bisa dibuka")
@@ -26,3 +26,4 @@ else:
 
 cap.release()
 cv2.destroyAllWindows()
+

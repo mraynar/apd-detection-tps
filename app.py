@@ -1,24 +1,3 @@
-"""
-PPE Detection System - Terminal Petikemas Surabaya (PT TPS - Pelindo)
-
-Real-time detection of helmet and safety vest usage using two separate
-YOLOv8-OBB models, displayed through a web dashboard.
-
-Known limitation (documented, not hidden): the helmet/head models can
-occasionally misclassify a bare head as "helmet" at certain angles or
-lighting conditions. This is a model training limitation, not a code bug.
-It is mitigated here via conservative confidence thresholds, but the
-long-term fix is retraining with a larger and more varied dataset
-(different angles, distances, lighting - see project notes).
-
-Features:
-- Simultaneous helmet and vest detection (2 independent models)
-- Adaptive lighting correction (CLAHE) for low-light conditions
-- Temporal smoothing to reduce detection flicker
-- Per-class confidence thresholds, tuned to reduce false positives
-- Supports both webcam and CCTV (RTSP) input
-- Auto-detects OS for camera backend compatibility (Windows & Mac)
-"""
 
 from flask import Flask, Response, render_template_string, jsonify
 from ultralytics import YOLO
@@ -74,7 +53,6 @@ latest_stats = {
     "detections": [],
     "fps": 0
 }
-
 
 def enhance_frame(frame):
     """

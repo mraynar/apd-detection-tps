@@ -1,0 +1,1172 @@
+"""
+PPE Detection System - Terminal Petikemas Surabaya (PT TPS - Pelindo)
+
+Real-time detection of helmet and safety vest usage using two separate
+YOLOv8-OBB models, displayed through a Next.js web dashboard.
+
+Known limitation (documented, not hidden): the helmet/head models can
+occasionally misclassify a bare head as "helmet" at certain angles or
+lighting conditions. This is a model training limitation, not a code bug.
+It is mitigated here via conservative confidence thresholds, but the
+long-term fix is retraining with a larger and more varied dataset
+(different angles, distances, lighting - see project notes).
+
+Features:
+- Simultaneous helmet and vest detection (2 independent models)
+- Adaptive lighting correction (CLAHE) for low-light conditions
+- Temporal smoothing to reduce detection flicker
+- Per-class confidence thresholds, tuned to reduce false positives
+- Supports both webcam and CCTV (RTSP) input
+- Auto-detects OS for camera backend compatibility (Windows & Mac)
+- REST JSON API for Next.js frontend
+- CORS enabled for localhost:3000 (Next.js dev) and production origin
+
+==== CAMERA INDEX NOTES (cross-platform) ====
+
+CAMERA_INDEX adalah urutan perangkat fisik seperti yang dideteksi oleh OS.
+Angka index-nya (0, 1, 2, ...) TIDAK berubah antar OS — yang berbeda antar OS
+hanyalah BACKEND yang digunakan oleh OpenCV:
+  - Windows: cv2.CAP_DSHOW (DirectShow) — lebih stabil untuk USB webcam di Windows
+  - macOS/Linux: default (AVFoundation di macOS, V4L2 di Linux)
+
+Konsekuensinya:
+  - Index 0 di Windows dan index 0 di macOS bisa menunjuk ke kamera fisik yang BERBEDA,
+    tergantung urutan deteksi OS dan perangkat yang terhubung.
+  - Tidak ada normalisasi silang OS — user harus refresh enumerasi di device masing-masing.
+
+Known issue — macOS Continuity Camera:
+  Jika iPhone berada di dekat Mac dan fitur Continuity Camera aktif, iPhone dapat
+  secara otomatis muncul sebagai kamera tambahan dan MENGUBAH urutan index yang ada.
+  Contoh: built-in webcam yang sebelumnya di index 0 bisa berpindah ke index 1.
+  Jika hasil enumerasi kamera terlihat aneh, cek System Settings > General > AirPlay & Handoff
+  dan nonaktifkan Continuity Camera sementara, atau cabut iPhone dari jangkauan Bluetooth/WiFi Mac.
+"""
+
+from flask import Flask, Response, jsonify, request, stream_with_context
+from flask_cors import CORS
+from ultralytics import YOLO
+from collections import deque, defaultdict
+import cv2
+import csv
+import io
+import os
+import platform
+import time
+import uuid
+import datetime
+import threading
+from functools import wraps
+import bcrypt
+from dotenv import load_dotenv
+
+# Load environmental variables
+load_dotenv()
+
+app = Flask(__name__)
+# Enable CORS for Next.js frontend with credentials support
+CORS(app, resources={r"/*": {
+    "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+    "allow_headers": ["Authorization", "Content-Type", "Cookie"]
+}}, supports_credentials=True)
+
+# ==== DATABASE CONFIGURATION ====
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/apd_detection")
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+from database import db, User, Session as DBSession, Violation
+db.init_app(app)
+
+# ==== CENTRAL ROLE-BASED ACCESS CONTROL (RBAC) ====
+ROLE_PERMISSIONS = {
+    "admin": {
+        "live_monitoring",
+        "camera_control",
+        "user_management",
+        "detection_control"
+    },
+    "user": {
+        "compliance_review",
+        "analytics"
+    }
+}
+
+def check_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except Exception:
+        return False
+
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+def require_auth(permission=None):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if request.method == 'OPTIONS':
+                return f(*args, **kwargs)
+
+            # Retrieve token from Authorization header, cookie, or query parameter
+            token = request.headers.get("Authorization")
+            if not token:
+                token = request.cookies.get("session_token")
+            if not token:
+                token = request.args.get("token")
+
+            if not token:
+                return jsonify({"error": "Unauthorized", "message": "Authentication token missing."}), 401
+
+            if isinstance(token, str) and token.startswith("Bearer "):
+                token = token[7:]
+
+            now = datetime.datetime.utcnow()
+            # Lookup the token in the database
+            session = DBSession.query.filter_by(token=token).first()
+            if not session or session.expires_at < now:
+                # If session is expired, delete it
+                if session:
+                    db.session.delete(session)
+                    db.session.commit()
+                return jsonify({"error": "Unauthorized", "message": "Invalid or expired session token."}), 401
+
+            # Validate role based on permission mapping
+            user_role = session.role
+            if permission:
+                allowed_permissions = ROLE_PERMISSIONS.get(user_role, set())
+                if permission not in allowed_permissions:
+                    return jsonify({
+                        "error": "Forbidden", 
+                        "message": f"Akses ditolak. Role '{user_role}' tidak memiliki izin '{permission}'."
+                    }), 403
+
+            request.user_session = {
+                "token": session.token,
+                "user_id": session.user_id,
+                "role": session.role
+            }
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
+
+
+# ==== AI MODELS ====
+# Paths are relative to backend/ — run `python app.py` from the backend/ folder
+MODEL_HELMET_PATH = '../runs/obb/train-2/weights/best.pt'
+MODEL_VEST_PATH = '../runs/obb/runs/obb/train_vest/weights/best.pt'
+
+try:
+    model_helmet = YOLO(MODEL_HELMET_PATH)
+    model_vest = YOLO(MODEL_VEST_PATH)
+    models_loaded = True
+except Exception as e:
+    print(f"[WARN] Could not load models: {e}")
+    models_loaded = False
+    model_helmet = None
+    model_vest = None
+
+# ==== VIDEO SOURCE SETTINGS ====
+# USE_RTSP = False -> use laptop webcam (for testing)
+# USE_RTSP = True  -> use CCTV camera via RTSP (for field deployment)
+USE_RTSP = False
+CAMERA_INDEX = 0
+RTSP_URL = "rtsp://username:password@camera_ip:port/stream"
+SELECTED_CAMERA_ID = "webcam_0"  # logical ID for the currently active source
+
+# Thread lock for camera/settings mutation
+camera_lock = threading.Lock()
+
+
+def open_camera(use_rtsp=None, rtsp_url=None, cam_index=None):
+    """Open a cv2 VideoCapture based on current settings."""
+    _use_rtsp = USE_RTSP if use_rtsp is None else use_rtsp
+    _rtsp_url = RTSP_URL if rtsp_url is None else rtsp_url
+    _cam_index = CAMERA_INDEX if cam_index is None else cam_index
+
+    if _use_rtsp:
+        cap = cv2.VideoCapture(_rtsp_url)
+    else:
+        if platform.system() == "Windows":
+            cap = cv2.VideoCapture(_cam_index, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(_cam_index)
+    return cap
+
+
+camera = open_camera()
+
+# ==== DETECTION SETTINGS ====
+# "helmet" and "head" thresholds are deliberately conservative (higher) because
+# these two classes are the most prone to confusion in the current model.
+# Lowering them increases false positives (bare head misread as helmet).
+CONFIDENCE_THRESHOLDS = {
+    "head": 0.5,
+    "helmet": 0.65,
+    "Safety Vest": 0.4,
+    "NO-Safety Vest": 0.45,
+}
+DEFAULT_THRESHOLD = 0.5
+
+NMS_IOU = 0.4
+VIOLATION_CLASSES = {"head", "NO-Safety Vest"}
+
+# Temporal smoothing: use the median violation count over recent frames
+# to avoid the number flickering between values on a per-frame basis.
+HISTORY_LENGTH = 5
+detection_history = deque(maxlen=HISTORY_LENGTH)
+
+# Toggle for pausing/resuming inference without stopping the camera
+is_detecting = True
+
+latest_stats = {
+    "total_objects": 0,
+    "violations": 0,
+    "detections": [],
+    "fps": 0,
+    "last_frame_time": None,
+}
+
+
+
+
+# Hourly buckets: key = "YYYY-MM-DD HH", value = {"total": int, "violations": int}
+hourly_buckets = defaultdict(lambda: {"total": 0, "violations": 0})
+
+# Daily summary: key = "YYYY-MM-DD", value = {"total": int, "violations": int}
+daily_summary = defaultdict(lambda: {"total": 0, "violations": 0})
+
+stats_lock = threading.Lock()
+
+
+# ==== HELPER FUNCTIONS ====
+
+def enhance_frame(frame):
+    """
+    Improve frame lighting and contrast before detection using CLAHE.
+    Sharpening was tested and removed: it introduced visible artifacts on
+    complex textures (hair, fabric edges) that made detection less reliable.
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    enhanced = cv2.merge((l, a, b))
+    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+    return enhanced
+
+
+def get_threshold(label):
+    return CONFIDENCE_THRESHOLDS.get(label, DEFAULT_THRESHOLD)
+
+
+def draw_violations_only(frame, results):
+    """Draw bounding boxes ONLY for classes considered a violation."""
+    names = results[0].names
+    detected = []
+
+    obb_data = results[0].obb
+    if obb_data is None:
+        return frame, detected
+
+    for box in obb_data:
+        cls_id = int(box.cls[0])
+        conf = float(box.conf[0])
+        label = names[cls_id]
+
+        if conf < get_threshold(label):
+            continue
+
+        is_violation = label in VIOLATION_CLASSES
+        detected.append({
+            "label": label,
+            "confidence": round(conf, 2),
+            "violation": is_violation,
+            "is_violation": is_violation,
+        })
+
+        if is_violation:
+            points = box.xyxyxyxy[0].cpu().numpy().astype(int)
+            cv2.polylines(frame, [points], isClosed=True, color=(0, 0, 255), thickness=2)
+            text_pos = (int(points[0][0]), int(points[0][1]) - 10)
+            cv2.putText(frame, f"{label} {conf:.2f}", text_pos,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    return frame, detected
+
+
+def smooth_violation_count(current_count):
+    detection_history.append(current_count)
+    sorted_history = sorted(detection_history)
+    mid = len(sorted_history) // 2
+    return sorted_history[mid]
+
+
+def record_detections(all_detected, now):
+    """Append violation events to PostgreSQL history and update bucket aggregates."""
+    hour_key = now.strftime("%Y-%m-%d %H")
+    day_key = now.strftime("%Y-%m-%d")
+
+    with stats_lock:
+        hourly_buckets[hour_key]["total"] += len(all_detected)
+        daily_summary[day_key]["total"] += len(all_detected)
+
+        # Query and write database mutations under Flask app context
+        with app.app_context():
+            added_any = False
+            for d in all_detected:
+                if d["violation"]:
+                    event_id = str(uuid.uuid4())
+                    timestamp_str = now.isoformat()
+                    camera_source = RTSP_URL if USE_RTSP else f"Webcam #{CAMERA_INDEX}"
+                    
+                    new_violation = Violation(
+                        id=event_id,
+                        timestamp=timestamp_str,
+                        label=d["label"],
+                        confidence=d["confidence"],
+                        camera_source=camera_source,
+                        is_violation=True
+                    )
+                    db.session.add(new_violation)
+                    added_any = True
+                    
+                    hourly_buckets[hour_key]["violations"] += 1
+                    daily_summary[day_key]["violations"] += 1
+
+            if added_any:
+                db.session.commit()
+
+                # Enforce 50-record FIFO cap in the database table
+                total_count = Violation.query.count()
+                if total_count > 50:
+                    to_delete = (
+                        Violation.query.order_by(Violation.timestamp.asc(), Violation.created_at.asc())
+                        .limit(total_count - 50)
+                        .all()
+                    )
+                    for v in to_delete:
+                        db.session.delete(v)
+                    db.session.commit()
+
+
+
+# ==== MJPEG STREAM GENERATOR ====
+
+def generate_frames():
+    global latest_stats, camera
+    prev_time = time.time()
+
+    while True:
+        with camera_lock:
+            success, frame = camera.read()
+
+        if not success:
+            # Yield a blank frame so the MJPEG stream stays alive
+            time.sleep(0.1)
+            continue
+
+        if not is_detecting or not models_loaded:
+            # Detection paused or models not loaded — stream raw frame
+            ret, buffer = cv2.imencode('.jpg', frame)
+            if ret:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.033)
+            continue
+
+        frame = enhance_frame(frame)
+
+        results_helmet = model_helmet(frame, verbose=False, iou=NMS_IOU)
+        results_vest = model_vest(frame, verbose=False, iou=NMS_IOU)
+
+        frame, detected_helmet = draw_violations_only(frame, results_helmet)
+        frame, detected_vest = draw_violations_only(frame, results_vest)
+
+        all_detected = detected_helmet + detected_vest
+        raw_violation_count = sum(1 for d in all_detected if d["violation"])
+        violation_count = smooth_violation_count(raw_violation_count)
+
+        current_time = time.time()
+        fps = 1 / (current_time - prev_time) if current_time != prev_time else 0
+        prev_time = current_time
+
+        now = datetime.datetime.now()
+
+        latest_stats = {
+            "total_objects": len(all_detected),
+            "violations": violation_count,
+            "detections": all_detected,
+            "fps": round(fps, 1),
+            "last_frame_time": now.isoformat(),
+        }
+
+        record_detections(all_detected, now)
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if ret:
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+
+# ==== ROUTES ====
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.get_json(force=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+
+    user = User.query.filter_by(username=username).first()
+    if not user or not check_password(password, user.password_hash):
+        return jsonify({"success": False, "message": "Username atau password salah."}), 401
+
+    token = str(uuid.uuid4())
+    expiry = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    session = DBSession(
+        token=token,
+        user_id=user.id,
+        role=user.role,
+        expires_at=expiry
+    )
+    db.session.add(session)
+    db.session.commit()
+
+    response = jsonify({
+        "success": True,
+        "token": token,
+        "role": user.role,
+        "username": user.username
+    })
+    # Set httpOnly cookie for session token, and standard cookie for user role.
+    response.set_cookie(
+        "session_token",
+        token,
+        httponly=True,
+        samesite="Lax",
+        max_age=86400,
+        path="/"
+    )
+    response.set_cookie(
+        "user_role",
+        user.role,
+        httponly=False,
+        samesite="Lax",
+        max_age=86400,
+        path="/"
+    )
+    return response
+
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    token = request.headers.get("Authorization")
+    if not token:
+        token = request.cookies.get("session_token")
+    if not token:
+        token = request.args.get("token")
+
+    if token:
+        if token.startswith("Bearer "):
+            token = token[7:]
+        session = DBSession.query.filter_by(token=token).first()
+        if session:
+            db.session.delete(session)
+            db.session.commit()
+            
+    response = jsonify({"success": True, "message": "Logout berhasil."})
+    response.delete_cookie("session_token", path="/")
+    response.delete_cookie("user_role", path="/")
+    return response
+
+
+@app.route('/api/session/verify')
+@require_auth()
+def api_session_verify():
+    session = request.user_session
+    user = User.query.get(session["user_id"])
+    if not user:
+        return jsonify({"error": "Unauthorized", "message": "User tidak ditemukan."}), 401
+    return jsonify({
+        "success": True,
+        "token": session["token"],
+        "role": session["role"],
+        "username": user.username
+    })
+
+
+@app.route('/video_feed')
+def video_feed():
+    token = request.args.get("token")
+    if not token:
+        token = request.cookies.get("session_token")
+        
+    if not token:
+        return "Unauthorized", 401
+        
+    if token.startswith("Bearer "):
+        token = token[7:]
+        
+    now = datetime.datetime.utcnow()
+    session = DBSession.query.filter_by(token=token).first()
+    if not session or session.expires_at < now:
+        return "Unauthorized", 401
+        
+    user_role = session.role
+    allowed_permissions = ROLE_PERMISSIONS.get(user_role, set())
+    if "live_monitoring" not in allowed_permissions:
+        return "Forbidden", 403
+        
+    return Response(
+        stream_with_context(generate_frames()),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+# Legacy stats endpoint (kept for backward compatibility)
+@app.route('/stats')
+@require_auth(permission="live_monitoring")
+def stats_legacy():
+    return jsonify(latest_stats)
+
+
+# ---- /api/status ----
+@app.route('/api/status')
+@require_auth(permission="live_monitoring")
+def api_status():
+    """
+    Returns smoothed real-time metrics.
+    network_latency_ms and model_load_pct are not measurable at this layer —
+    they are returned as null rather than fabricated numbers.
+    """
+    return jsonify({
+        "fps": latest_stats["fps"],
+        "total_detected": latest_stats["total_objects"],
+        "violations": latest_stats["violations"],
+        "network_latency_ms": None,  # Not available server-side; measure client-side if needed
+        "model_load_pct": None,       # Not exposed by ultralytics at runtime
+        "is_detecting": is_detecting,
+        "stream_active": camera.isOpened() if camera else False,
+    })
+
+
+# ---- /api/detections/live ----
+@app.route('/api/detections/live')
+@require_auth(permission="live_monitoring")
+def api_detections_live():
+    """Returns the detection list from the most recently processed frame."""
+    ts = latest_stats.get("last_frame_time") or datetime.datetime.now().isoformat()
+    detections = []
+    for d in latest_stats.get("detections", []):
+        detections.append({
+            "label": d["label"],
+            "confidence": d["confidence"],
+            "is_violation": d.get("is_violation", d.get("violation", False)),
+            "timestamp": ts,
+        })
+    return jsonify(detections)
+
+
+
+
+# ---- /api/cameras ----
+
+def enumerate_local_cameras():
+    """
+    Probe camera indices 0..4 to find all physically available local cameras.
+
+    Validation is STRICT: a camera is only marked available=True if:
+      1. cv2.VideoCapture(index) opens successfully (isOpened() == True), AND
+      2. At least one frame can be read (cap.read() returns ret=True)
+
+    Rationale: on macOS, cv2.VideoCapture(index).isOpened() can return True even
+    when the app hasn't been granted camera permission yet — the capture opens but
+    every cap.read() returns ret=False. Checking frame read ensures we only surface
+    cameras the user can actually stream from right now.
+
+    OS-specific backend selection (MUST NOT be removed):
+      - Windows: cv2.CAP_DSHOW for DirectShow — required for stable USB webcam on Win
+      - macOS/Linux: default backend (AVFoundation on macOS)
+    Index numbers themselves are NOT OS-specific; only the backend flag differs.
+    """
+    results = []
+    is_windows = platform.system() == "Windows"
+
+    for idx in range(5):  # probe 0..4 — catches USB cameras at higher indices
+        cap = None
+        try:
+            if is_windows:
+                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            else:
+                cap = cv2.VideoCapture(idx)
+
+            if not cap.isOpened():
+                # Device does not exist at this index on this OS
+                continue
+
+            # Attempt to read one frame — validates actual access (e.g. macOS permission)
+            ret, _ = cap.read()
+
+            if ret:
+                hint = ""
+                if idx == 0:
+                    hint = " (Built-in / Default)"
+                elif is_windows:
+                    hint = " (USB/External)"
+                results.append({
+                    "type": "local",
+                    "index": idx,
+                    "label": f"Kamera Index {idx}{hint}",
+                    "available": True,
+                    "unavailable_reason": None,
+                })
+            else:
+                # Opened but unreadable — likely a permission issue (macOS) or
+                # device in use by another application
+                results.append({
+                    "type": "local",
+                    "index": idx,
+                    "label": f"Kamera Index {idx}",
+                    "available": False,
+                    "unavailable_reason": "Tidak dapat membaca frame — periksa izin kamera atau tutup aplikasi lain yang menggunakan kamera ini.",
+                })
+
+        except Exception as exc:
+            results.append({
+                "type": "local",
+                "index": idx,
+                "label": f"Kamera Index {idx}",
+                "available": False,
+                "unavailable_reason": f"Error saat probe: {str(exc)}",
+            })
+        finally:
+            if cap is not None:
+                cap.release()
+
+    return results
+
+
+@app.route('/api/cameras')
+@require_auth(permission="camera_control")
+def api_cameras():
+    """
+    Returns all detected camera sources grouped into two sections:
+      - local_cameras[]: webcam/USB cameras enumerated in real-time (indices 0..4)
+      - rtsp_cameras[]:  saved RTSP entries from current settings
+
+    Enumeration is run fresh on every call — not cached — so newly plugged USB
+    cameras or freshly granted permissions are picked up without a server restart.
+    The frontend should show a refresh button that re-calls this endpoint.
+
+    See enumerate_local_cameras() docstring for cross-platform notes.
+    """
+    local_cameras = enumerate_local_cameras()
+
+    rtsp_cameras = []
+    if RTSP_URL and RTSP_URL != "rtsp://username:password@camera_ip:port/stream":
+        rtsp_cameras.append({
+            "id": "rtsp_0",
+            "label": "CCTV RTSP (tersimpan)",
+            "rtsp_url": RTSP_URL,
+            "last_test_status": None,  # populated after user explicitly tests
+        })
+
+    return jsonify({
+        "local_cameras": local_cameras,
+        "rtsp_cameras": rtsp_cameras,
+        "os": platform.system(),
+    })
+
+
+# ---- /api/camera/settings ----
+@app.route('/api/camera/settings', methods=['GET'])
+@require_auth(permission="camera_control")
+def api_camera_settings_get():
+    connection_status = "connected" if (camera and camera.isOpened()) else "disconnected"
+    return jsonify({
+        "use_rtsp": USE_RTSP,
+        "rtsp_url": RTSP_URL,
+        "camera_index": CAMERA_INDEX,
+        "selected_camera_id": SELECTED_CAMERA_ID,
+        "connection_status": connection_status,
+    })
+
+
+@app.route('/api/camera/settings', methods=['POST'])
+@require_auth(permission="camera_control")
+def api_camera_settings_post():
+    global USE_RTSP, RTSP_URL, CAMERA_INDEX, SELECTED_CAMERA_ID, camera
+
+    data = request.get_json(force=True) or {}
+    new_use_rtsp = data.get("use_rtsp", USE_RTSP)
+    new_rtsp_url = data.get("rtsp_url", RTSP_URL).strip()
+    new_camera_index = int(data.get("camera_index", CAMERA_INDEX))
+
+    # Test the connection properly
+    if new_use_rtsp:
+        # Check RTSP connection first using test function with timeout
+        res = _test_rtsp_with_timeout(new_rtsp_url)
+        if not res["success"]:
+            return jsonify({
+                "success": False,
+                "connection_status": res["connection_status"],
+                "message": f"Gagal terhubung ke RTSP: {res['message']}"
+            }), 422
+    else:
+        # Check local webcam
+        test_cap = open_camera(use_rtsp=False, cam_index=new_camera_index)
+        ok = test_cap.isOpened()
+        if ok:
+            ret, _ = test_cap.read()
+            ok = ret
+        test_cap.release()
+        if not ok:
+            return jsonify({
+                "success": False,
+                "connection_status": "disconnected",
+                "message": f"Gagal terhubung ke Kamera Lokal index {new_camera_index}. Pastikan izin kamera aktif atau tutup aplikasi lain yang sedang menggunakannya."
+            }), 422
+
+    # If test passed, apply the source
+    with camera_lock:
+        if camera:
+            camera.release()
+        USE_RTSP = new_use_rtsp
+        RTSP_URL = new_rtsp_url
+        CAMERA_INDEX = new_camera_index
+        SELECTED_CAMERA_ID = "rtsp_0" if new_use_rtsp else f"webcam_{new_camera_index}"
+        camera = open_camera()
+
+    connection_status = "connected" if (camera and camera.isOpened()) else "disconnected"
+
+    return jsonify({
+        "success": True,
+        "connection_status": connection_status,
+        "message": "Kamera berhasil diterapkan dan aktif streaming.",
+        "use_rtsp": USE_RTSP,
+        "rtsp_url": RTSP_URL,
+        "camera_index": CAMERA_INDEX,
+    })
+
+
+
+# ---- /api/camera/test ----
+
+RTSP_CONNECT_TIMEOUT_MS = 6000   # 6 detik — cukup untuk CCTV lokal, tidak terlalu lama untuk UI
+RTSP_READ_TIMEOUT_MS    = 4000   # timeout baca frame setelah koneksi terbuka
+
+
+def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
+    """
+    Test RTSP connection with explicit timeouts via OpenCV CAP_PROP_*_TIMEOUT_MSEC.
+    """
+    cap = cv2.VideoCapture()
+    try:
+        # Set timeouts BEFORE opening — must be set on an unopened capture
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_CONNECT_TIMEOUT_MS)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
+        cap.open(rtsp_url)
+
+        if not cap.isOpened():
+            return {
+                "success": False,
+                "connection_status": "disconnected",
+                "message": "Koneksi RTSP gagal dibuka. Kemungkinan penyebab: alamat IP salah, port tertutup, atau CCTV tidak merespons dalam batas waktu 6 detik.",
+            }
+
+        ret, _ = cap.read()
+        if not ret:
+            return {
+                "success": False,
+                "connection_status": "no_frame",
+                "message": "Koneksi terbuka tetapi tidak ada frame yang diterima. Kemungkinan penyebab: autentikasi salah (username/password), codec tidak didukung, atau stream path salah.",
+            }
+
+        return {
+            "success": True,
+            "connection_status": "connected",
+            "message": "Koneksi RTSP berhasil dan frame berhasil dibaca.",
+        }
+    finally:
+        cap.release()
+
+
+@app.route('/api/camera/test', methods=['POST'])
+@require_auth(permission="camera_control")
+def api_camera_test():
+    """
+    Test RTSP or webcam connection without applying it permanently.
+    Returns real connection result — never hardcoded success.
+    """
+    data = request.get_json(force=True) or {}
+    use_rtsp = data.get("use_rtsp", False)
+    rtsp_url = data.get("rtsp_url", "").strip()
+    camera_index = int(data.get("camera_index", 0))
+
+    start = time.time()
+
+    try:
+        if use_rtsp:
+            if not rtsp_url:
+                return jsonify({
+                    "success": False,
+                    "connection_status": "error",
+                    "latency_ms": None,
+                    "message": "Alamat RTSP tidak boleh kosong saat mode RTSP aktif.",
+                })
+            result = _test_rtsp_with_timeout(rtsp_url)
+        else:
+            # Local camera test — same strict validation as enumerate_local_cameras
+            cap = None
+            try:
+                is_windows = platform.system() == "Windows"
+                if is_windows:
+                    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+                else:
+                    cap = cv2.VideoCapture(camera_index)
+
+                if not cap.isOpened():
+                    result = {
+                        "success": False,
+                        "connection_status": "disconnected",
+                        "message": f"Kamera index {camera_index} tidak ditemukan pada sistem ini.",
+                    }
+                else:
+                    ret, _ = cap.read()
+                    if ret:
+                        result = {
+                            "success": True,
+                            "connection_status": "connected",
+                            "message": f"Kamera index {camera_index} berhasil dibuka dan frame berhasil dibaca.",
+                        }
+                    else:
+                        result = {
+                            "success": False,
+                            "connection_status": "no_frame",
+                            "message": f"Kamera index {camera_index} terbuka tetapi tidak dapat membaca frame. Periksa izin kamera di System Settings atau tutup aplikasi lain yang sedang menggunakan kamera.",
+                        }
+            finally:
+                if cap is not None:
+                    cap.release()
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "connection_status": "error",
+            "latency_ms": None,
+            "message": f"Exception saat test: {str(exc)}",
+        })
+
+    latency_ms = round((time.time() - start) * 1000)
+    result["latency_ms"] = latency_ms
+    return jsonify(result)
+
+
+# ---- /api/violations ----
+@app.route('/api/violations')
+@require_auth(permission="compliance_review")
+def api_violations():
+    """Paginated violation history from PostgreSQL."""
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 20))
+    filter_type = request.args.get("filter_type", "")   # label filter
+    filter_date = request.args.get("filter_date", "")   # YYYY-MM-DD
+    search = request.args.get("search", "").lower()
+
+    # Query from database under app context
+    with app.app_context():
+        query = Violation.query
+        
+        # Apply filters
+        if filter_type:
+            query = query.filter_by(label=filter_type)
+        if filter_date:
+            query = query.filter(Violation.timestamp.like(f"{filter_date}%"))
+        if search:
+            query = query.filter(
+                (Violation.label.ilike(f"%{search}%")) |
+                (Violation.camera_source.ilike(f"%{search}%"))
+            )
+            
+        # Get all matching violations sorted by timestamp descending
+        violations_db = query.order_by(Violation.timestamp.desc()).all()
+        
+        items = []
+        for v in violations_db:
+            items.append({
+                "id": v.id,
+                "timestamp": v.timestamp,
+                "label": v.label,
+                "confidence": v.confidence,
+                "camera_source": v.camera_source,
+                "is_violation": v.is_violation
+            })
+
+    total_count = len(items)
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_items = items[start:end]
+
+    return jsonify({
+        "page": page,
+        "per_page": per_page,
+        "total_count": total_count,
+        "total_pages": (total_count + per_page - 1) // per_page if total_count else 1,
+        "data": page_items,
+    })
+
+
+# ---- /api/violations/export ----
+@app.route('/api/violations/export')
+@require_auth(permission="compliance_review")
+def api_violations_export():
+    """Export filtered violation history as CSV from database."""
+    filter_type = request.args.get("filter_type", "")
+    filter_date = request.args.get("filter_date", "")
+    search = request.args.get("search", "").lower()
+
+    with app.app_context():
+        query = Violation.query
+        if filter_type:
+            query = query.filter_by(label=filter_type)
+        if filter_date:
+            query = query.filter(Violation.timestamp.like(f"{filter_date}%"))
+        if search:
+            query = query.filter(
+                (Violation.label.ilike(f"%{search}%")) |
+                (Violation.camera_source.ilike(f"%{search}%"))
+            )
+        violations_db = query.order_by(Violation.timestamp.desc()).all()
+        
+        items = []
+        for v in violations_db:
+            items.append({
+                "id": v.id,
+                "timestamp": v.timestamp,
+                "label": v.label,
+                "confidence": v.confidence,
+                "camera_source": v.camera_source
+            })
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["id", "timestamp", "label", "confidence", "camera_source"])
+    writer.writeheader()
+    for item in items:
+        writer.writerow({
+            "id": item.get("id", ""),
+            "timestamp": item.get("timestamp", ""),
+            "label": item.get("label", ""),
+            "confidence": item.get("confidence", ""),
+            "camera_source": item.get("camera_source", ""),
+        })
+
+    output.seek(0)
+    filename = f"violations_{datetime.date.today().isoformat()}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ---- /api/analytics/summary ----
+@app.route('/api/analytics/summary')
+@require_auth(permission="analytics")
+def api_analytics_summary():
+    today = datetime.date.today().isoformat()
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+
+    with stats_lock:
+        today_data = daily_summary.get(today, {"total": 0, "violations": 0})
+        yesterday_data = daily_summary.get(yesterday, {"total": 0, "violations": 0})
+
+    total_today = today_data["total"]
+    violations_today = today_data["violations"]
+    total_yesterday = yesterday_data["total"]
+    violations_yesterday = yesterday_data["violations"]
+
+    compliant_today = total_today - violations_today
+    compliance_rate = round((compliant_today / total_today * 100), 1) if total_today > 0 else None
+
+    def calc_trend(today_val, yesterday_val):
+        if yesterday_val == 0:
+            return None
+        return round(((today_val - yesterday_val) / yesterday_val) * 100, 1)
+
+    return jsonify({
+        "total_detected_today": total_today,
+        "total_violations_today": violations_today,
+        "compliance_rate_pct": compliance_rate,
+        "trend_total_vs_yesterday": calc_trend(total_today, total_yesterday),
+        "trend_violations_vs_yesterday": calc_trend(violations_today, violations_yesterday),
+        "trend_compliance_vs_yesterday": None,
+    })
+
+
+# ---- /api/analytics/hourly ----
+@app.route('/api/analytics/hourly')
+@require_auth(permission="analytics")
+def api_analytics_hourly():
+    """Returns per-hour activity for today."""
+    today = datetime.date.today().isoformat()
+    result = []
+    for hour in range(24):
+        key = f"{today} {hour:02d}"
+        with stats_lock:
+            bucket = hourly_buckets.get(key, {"total": 0, "violations": 0})
+        result.append({
+            "hour": hour,
+            "label": f"{hour:02d}:00",
+            "total_activity": bucket["total"],
+            "violations": bucket["violations"],
+        })
+    return jsonify(result)
+
+
+# ---- /api/analytics/by-type ----
+@app.route('/api/analytics/by-type')
+@require_auth(permission="analytics")
+def api_analytics_by_type():
+    """Returns violation count broken down by label type from database."""
+    today = datetime.date.today().isoformat()
+    counts = defaultdict(int)
+
+    with app.app_context():
+        today_violations = Violation.query.filter(Violation.timestamp.like(f"{today}%")).all()
+        for v in today_violations:
+            counts[v.label] += 1
+
+    result = [{"type": label, "count": count} for label, count in counts.items()]
+    result.sort(key=lambda x: x["count"], reverse=True)
+    return jsonify(result)
+
+
+# ---- /api/detection/toggle ----
+@app.route('/api/detection/toggle', methods=['POST'])
+@require_auth(permission="detection_control")
+def api_detection_toggle():
+    """Pause or resume YOLO inference. Camera stream keeps running."""
+    global is_detecting
+    data = request.get_json(force=True) or {}
+    if "is_detecting" in data:
+        is_detecting = bool(data["is_detecting"])
+    else:
+        is_detecting = not is_detecting
+    return jsonify({"is_detecting": is_detecting})
+
+
+# ==== ADMIN USER MANAGEMENT ENDPOINTS ====
+
+@app.route('/api/users', methods=['GET'])
+@require_auth(permission="user_management")
+def api_users_get():
+    users = User.query.order_by(User.id.asc()).all()
+    results = []
+    for u in users:
+        results.append({
+            "id": u.id,
+            "username": u.username,
+            "role": u.role,
+            "created_at": u.created_at.isoformat()
+        })
+    return jsonify(results)
+
+
+@app.route('/api/users', methods=['POST'])
+@require_auth(permission="user_management")
+def api_users_post():
+    data = request.get_json(force=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    role = data.get("role", "").strip()
+
+    if not username or not password or not role:
+        return jsonify({"success": False, "message": "Username, password, dan role wajib diisi."}), 400
+
+    if role not in ["admin", "user"]:
+        return jsonify({"success": False, "message": "Role harus 'admin' atau 'user'."}), 400
+
+    existing = User.query.filter_by(username=username).first()
+    if existing:
+        return jsonify({"success": False, "message": "Username sudah terdaftar."}), 400
+
+    hashed_pw = hash_password(password)
+    new_user = User(username=username, password_hash=hashed_pw, role=role)
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({"success": True, "message": "User berhasil dibuat."}), 201
+
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+@require_auth(permission="user_management")
+def api_users_delete(user_id):
+    current_user_id = request.user_session["user_id"]
+    if current_user_id == user_id:
+        return jsonify({"success": False, "message": "Anda tidak dapat menghapus akun Anda sendiri."}), 400
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"success": False, "message": "User tidak ditemukan."}), 404
+
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({"success": True, "message": "User berhasil dihapus."})
+
+
+@app.route('/api/users/<int:user_id>', methods=['PATCH'])
+@require_auth(permission="user_management")
+def api_users_patch(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"success": False, "message": "User tidak ditemukan."}), 404
+
+    data = request.get_json(force=True) or {}
+    role = data.get("role")
+    password = data.get("password")
+
+    if role:
+        if role not in ["admin", "user"]:
+            return jsonify({"success": False, "message": "Role harus 'admin' atau 'user'."}), 400
+        user.role = role
+
+    if password:
+        password = password.strip()
+        if not password:
+            return jsonify({"success": False, "message": "Password tidak boleh kosong."}), 400
+        user.password_hash = hash_password(password)
+
+    db.session.commit()
+    return jsonify({"success": True, "message": "User berhasil diperbarui."})
+
+
+def init_aggregates_from_db():
+    """Load historical violation data into in-memory hourly/daily aggregates on startup."""
+    print("Pre-populating hourly and daily violation aggregates from database...")
+    try:
+        with app.app_context():
+            violations = Violation.query.all()
+            for v in violations:
+                try:
+                    dt = datetime.datetime.fromisoformat(v.timestamp)
+                    hour_key = dt.strftime("%Y-%m-%d %H")
+                    day_key = dt.strftime("%Y-%m-%d")
+                    
+                    hourly_buckets[hour_key]["violations"] += 1
+                    hourly_buckets[hour_key]["total"] = max(hourly_buckets[hour_key]["total"], hourly_buckets[hour_key]["violations"])
+                    
+                    daily_summary[day_key]["violations"] += 1
+                    daily_summary[day_key]["total"] = max(daily_summary[day_key]["total"], daily_summary[day_key]["violations"])
+                except Exception:
+                    pass
+            print(f"Pre-populated aggregates for {len(violations)} historical violations.")
+    except Exception as e:
+        print(f"[WARN] Failed to pre-populate aggregates: {e}")
+
+
+if __name__ == '__main__':
+    init_aggregates_from_db()
+    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
+
+

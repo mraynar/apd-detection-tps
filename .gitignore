@@ -1,9 +1,22 @@
 venv/
 __pycache__/
 *.pyc
+*.last.pt
 .DS_Store
 dataset/
 VEST-SAFETY/
+
+# Next.js frontend
+node_modules/
+.next/
+frontend/.env.local
+frontend/out/
+.env
+*.env
+.env.local
+
+
+# Model checkpoints (keep best.pt, exclude last.pt)
 runs/obb/train-2/weights/last.pt
 runs/obb/runs/obb/train_vest/weights/last.pt
 
