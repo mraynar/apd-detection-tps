@@ -58,6 +58,7 @@ import threading
 from functools import wraps
 import bcrypt
 from dotenv import load_dotenv
+import numpy as np
 
 # Load environmental variables
 load_dotenv()
@@ -83,7 +84,9 @@ ROLE_PERMISSIONS = {
         "live_monitoring",
         "camera_control",
         "user_management",
-        "detection_control"
+        "detection_control",
+        "compliance_review",
+        "analytics"
     },
     "user": {
         "compliance_review",
@@ -153,7 +156,7 @@ def require_auth(permission=None):
 
 # ==== AI MODELS ====
 # Paths are relative to backend/ — run `python app.py` from the backend/ folder
-MODEL_HELMET_PATH = '../runs/obb/train-2/weights/best.pt'
+MODEL_HELMET_PATH = '../runs/obb/train-3/weights/best.pt'
 MODEL_VEST_PATH = '../runs/obb/runs/obb/train_vest/weights/best.pt'
 
 try:
@@ -174,6 +177,10 @@ CAMERA_INDEX = 0
 RTSP_URL = "rtsp://username:password@camera_ip:port/stream"
 SELECTED_CAMERA_ID = "webcam_0"  # logical ID for the currently active source
 
+# Target webcam capture resolution
+CAPTURE_WIDTH = 1920
+CAPTURE_HEIGHT = 1080
+
 # Thread lock for camera/settings mutation
 camera_lock = threading.Lock()
 
@@ -191,6 +198,16 @@ def open_camera(use_rtsp=None, rtsp_url=None, cam_index=None):
             cap = cv2.VideoCapture(_cam_index, cv2.CAP_DSHOW)
         else:
             cap = cv2.VideoCapture(_cam_index)
+            
+        # Set target resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        
+        # Read back actual resolution achieved
+        actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"[INFO] Webcam index {_cam_index} resolution set to: {actual_w}x{actual_h} (target: {CAPTURE_WIDTH}x{CAPTURE_HEIGHT})")
+        
     return cap
 
 
@@ -238,6 +255,10 @@ daily_summary = defaultdict(lambda: {"total": 0, "violations": 0})
 
 stats_lock = threading.Lock()
 
+# Cooldown for duplicate violation saving (in seconds)
+VIOLATION_COOLDOWN_SEC = 5.0
+last_logged_violations = {}  # key: (camera_source, label), value: time.time() float
+
 
 # ==== HELPER FUNCTIONS ====
 
@@ -246,16 +267,27 @@ def enhance_frame(frame):
     Improve frame lighting and contrast before detection using CLAHE.
     Sharpening was tested and removed: it introduced visible artifacts on
     complex textures (hair, fabric edges) that made detection less reliable.
+    
+    Tuned: clipLimit set to 2.5 for stronger low-light correction, and added
+    a conditional gamma correction step for dark frames to avoid over-exposure.
     """
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    
+    # Conditional gamma correction for low-light frames (L-channel mean < 75)
+    mean_l = np.mean(l)
+    if mean_l < 75:
+        # Boost shadows and dark regions
+        gamma = 1.4
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+        l = cv2.LUT(l, table)
+        
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     l = clahe.apply(l)
     enhanced = cv2.merge((l, a, b))
     enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
     return enhanced
-
-
 def get_threshold(label):
     return CONFIDENCE_THRESHOLDS.get(label, DEFAULT_THRESHOLD)
 
@@ -316,14 +348,25 @@ def record_detections(all_detected, now):
             added_any = False
             for d in all_detected:
                 if d["violation"]:
+                    camera_source = RTSP_URL if USE_RTSP else f"Webcam #{CAMERA_INDEX}"
+                    label = d["label"]
+                    
+                    # Cooldown check to deduplicate violations
+                    cooldown_key = (camera_source, label)
+                    current_time = time.time()
+                    last_logged = last_logged_violations.get(cooldown_key, 0.0)
+                    if current_time - last_logged < VIOLATION_COOLDOWN_SEC:
+                        continue
+                        
+                    last_logged_violations[cooldown_key] = current_time
+                    
                     event_id = str(uuid.uuid4())
                     timestamp_str = now.isoformat()
-                    camera_source = RTSP_URL if USE_RTSP else f"Webcam #{CAMERA_INDEX}"
                     
                     new_violation = Violation(
                         id=event_id,
                         timestamp=timestamp_str,
-                        label=d["label"],
+                        label=label,
                         confidence=d["confidence"],
                         camera_source=camera_source,
                         is_violation=True
@@ -368,7 +411,7 @@ def generate_frames():
 
         if not is_detecting or not models_loaded:
             # Detection paused or models not loaded — stream raw frame
-            ret, buffer = cv2.imencode('.jpg', frame)
+            ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
             if ret:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
@@ -403,7 +446,7 @@ def generate_frames():
 
         record_detections(all_detected, now)
 
-        ret, buffer = cv2.imencode('.jpg', frame)
+        ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if ret:
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
@@ -760,36 +803,75 @@ RTSP_READ_TIMEOUT_MS    = 4000   # timeout baca frame setelah koneksi terbuka
 def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
     """
     Test RTSP connection with explicit timeouts via OpenCV CAP_PROP_*_TIMEOUT_MSEC.
+    Logs raw OpenCV/FFMPEG diagnostic details to terminal for operator debugging.
     """
+    import shutil, subprocess as _sp
+    print(f"[RTSP TEST] Testing URL: {rtsp_url}")
+
+    # Quick ffprobe pre-check (distinguishes network failure from codec/auth failure)
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path:
+        try:
+            probe = _sp.run(
+                [ffprobe_path, "-v", "error", "-rtsp_transport", "tcp",
+                 "-timeout", "5000000", rtsp_url],
+                capture_output=True, text=True, timeout=8
+            )
+            if probe.returncode != 0:
+                print(f"[RTSP TEST] ffprobe stderr: {probe.stderr.strip()}")
+            else:
+                print(f"[RTSP TEST] ffprobe succeeded")
+        except Exception as e:
+            print(f"[RTSP TEST] ffprobe pre-check error: {e}")
+    else:
+        print("[RTSP TEST] ffprobe not found — skipping pre-check")
+
     cap = cv2.VideoCapture()
     try:
-        # Set timeouts BEFORE opening — must be set on an unopened capture
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_CONNECT_TIMEOUT_MS)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
         cap.open(rtsp_url)
 
-        if not cap.isOpened():
+        opened = cap.isOpened()
+        print(f"[RTSP TEST] cap.isOpened() = {opened}")
+
+        if not opened:
+            # Try TCP transport as fallback (UDP can be silently blocked by firewalls)
+            rtsp_tcp = rtsp_url.replace("rtsp://", "rtspt://", 1) if rtsp_url.startswith("rtsp://") else None
+            if rtsp_tcp and rtsp_tcp != rtsp_url:
+                print(f"[RTSP TEST] Retrying with TCP: {rtsp_tcp}")
+                cap2 = cv2.VideoCapture()
+                cap2.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_CONNECT_TIMEOUT_MS)
+                cap2.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
+                cap2.open(rtsp_tcp)
+                if cap2.isOpened():
+                    ret2, _ = cap2.read()
+                    cap2.release()
+                    if ret2:
+                        return {"success": True, "connection_status": "connected",
+                                "message": "Koneksi RTSP berhasil via TCP transport. Frame berhasil dibaca."}
+                cap2.release()
             return {
-                "success": False,
-                "connection_status": "disconnected",
-                "message": "Koneksi RTSP gagal dibuka. Kemungkinan penyebab: alamat IP salah, port tertutup, atau CCTV tidak merespons dalam batas waktu 6 detik.",
+                "success": False, "connection_status": "disconnected",
+                "message": "Koneksi RTSP gagal dibuka. Cek: (1) URL/IP/port benar, (2) Port tidak diblokir firewall jaringan, (3) Coba buka URL yang sama di VLC untuk konfirmasi network.",
             }
 
         ret, _ = cap.read()
+        print(f"[RTSP TEST] cap.read() ret = {ret}")
         if not ret:
             return {
-                "success": False,
-                "connection_status": "no_frame",
-                "message": "Koneksi terbuka tetapi tidak ada frame yang diterima. Kemungkinan penyebab: autentikasi salah (username/password), codec tidak didukung, atau stream path salah.",
+                "success": False, "connection_status": "no_frame",
+                "message": "Koneksi terbuka tetapi tidak ada frame. Cek: (1) Kredensial RTSP (username/password), (2) Stream path/channel, (3) Codec H.264/H.265 didukung.",
             }
 
-        return {
-            "success": True,
-            "connection_status": "connected",
-            "message": "Koneksi RTSP berhasil dan frame berhasil dibaca.",
-        }
+        return {"success": True, "connection_status": "connected",
+                "message": "Koneksi RTSP berhasil dan frame berhasil dibaca."}
     finally:
         cap.release()
+
+
+
+
 
 
 @app.route('/api/camera/test', methods=['POST'])

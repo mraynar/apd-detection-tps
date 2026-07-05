@@ -5,7 +5,7 @@ import PageShell from "@/components/PageShell";
 import { API, apiFetch } from "@/lib/api";
 import {
   Search, Download, AlertTriangle, ChevronLeft, ChevronRight,
-  MoreVertical, Eye, Filter
+  Eye, Filter
 } from "lucide-react";
 
 interface Violation {
@@ -283,11 +283,12 @@ export default function ViolationHistoryPage() {
                         </td>
                         <td>
                           <button
-                            className="topbar-icon-btn"
+                            className="btn btn-ghost btn-sm"
                             title="Lihat Detail"
+                            style={{ padding: "4px 8px" }}
                             onClick={() => alert(`Detail pelanggaran:\nID: ${v.id}\nLabel: ${v.label}\nConfidence: ${conf}%\nWaktu: ${formatDateTime(v.timestamp)}\nKamera: ${v.camera_source}`)}
                           >
-                            <MoreVertical size={15} />
+                            <Eye size={14} />
                           </button>
                         </td>
                       </tr>

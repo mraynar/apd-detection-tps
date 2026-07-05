@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Allow the Flask backend to serve the MJPEG stream and any static images
   images: {
     remotePatterns: [
       {
@@ -17,6 +16,18 @@ const nextConfig: NextConfig = {
         pathname: "/**",
       },
     ],
+  },
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: "http://localhost:5001/api/:path*",
+      },
+      {
+        source: "/video_feed",
+        destination: "http://localhost:5001/video_feed",
+      },
+    ];
   },
 };
 

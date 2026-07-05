@@ -15,8 +15,15 @@ frontend/out/
 *.env
 .env.local
 
-
-# Model checkpoints (keep best.pt, exclude last.pt)
 runs/obb/train-2/weights/last.pt
 runs/obb/runs/obb/train_vest/weights/last.pt
 
+auto.key
+auto.crt
+*.key
+*.crt
+cookies.txt
+frontend/cookies.txt
+datasets-new/
+runs_backup_20260705/
+runs/

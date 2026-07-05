@@ -1,4 +1,6 @@
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:5001";
+const BACKEND = typeof window === "undefined"
+  ? (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:5001")
+  : "";
 
 export const API = {
   status: () => `${BACKEND}/api/status`,
@@ -57,6 +59,8 @@ export async function apiFetch<T>(url: string, opts?: RequestInit): Promise<T> {
     localStorage.removeItem("token");
     localStorage.removeItem("role");
     localStorage.removeItem("username");
+    // Clear user_role cookie so middleware knows to allow /login rendering
+    document.cookie = "user_role=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
     window.location.href = "/login";
   }
 

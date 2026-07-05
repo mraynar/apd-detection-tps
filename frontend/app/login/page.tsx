@@ -82,6 +82,7 @@ export default function LoginPage() {
         padding: "16px 20px",
         borderRadius: "12px",
         backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
         border: "1px solid rgba(255, 255, 255, 0.1)"
       }}>
         <Image src={tpsLogo} alt="TPS Logo" width={tpsWidth} height={44} priority />

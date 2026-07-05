@@ -6,7 +6,7 @@ import { useInterval } from "@/hooks/useInterval";
 import { API, apiFetch } from "@/lib/api";
 import {
   Activity, AlertTriangle, Eye, PauseCircle, PlayCircle,
-  Download, Wifi, WifiOff, Cpu, Radio, Shield
+  Download, Wifi, WifiOff, Radio, Shield
 } from "lucide-react";
 
 
@@ -36,11 +36,13 @@ function formatTime(iso: string) {
 }
 
 export default function LiveMonitoringPage() {
+  const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<StatusData | null>(null);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [streamError, setStreamError] = useState(false);
   const [isDetecting, setIsDetecting] = useState(true);
   const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
+  const [toggleError, setToggleError] = useState("");
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -64,6 +66,7 @@ export default function LiveMonitoringPage() {
 
   // Initial fetch
   useEffect(() => {
+    setMounted(true);
     fetchStatus();
     fetchDetections();
   }, [fetchStatus, fetchDetections]);
@@ -73,6 +76,7 @@ export default function LiveMonitoringPage() {
   useInterval(fetchDetections, 1000);
 
   const toggleDetection = async () => {
+    setToggleError("");
     try {
       const data = await apiFetch<{ is_detecting: boolean }>(API.detectionToggle(), {
         method: "POST",
@@ -81,7 +85,8 @@ export default function LiveMonitoringPage() {
       });
       setIsDetecting(data.is_detecting);
     } catch {
-      alert("Gagal toggle deteksi — pastikan backend berjalan.");
+      setToggleError("Gagal toggle deteksi — pastikan backend berjalan.");
+      setTimeout(() => setToggleError(""), 4000);
     }
   };
 
@@ -94,17 +99,18 @@ export default function LiveMonitoringPage() {
   const helmetDetections = detections.filter(
     (d) => d.label === "helmet" || d.label === "head"
   );
-  const totalHelmets = helmetDetections.length;
   const compliantHelmets = helmetDetections.filter((d) => d.label === "helmet").length;
-  const helmetRate = totalHelmets > 0 ? Math.round((compliantHelmets / totalHelmets) * 100) : null;
+  const violationHelmets = helmetDetections.filter((d) => d.label === "head").length;
 
   // Vest calculations
   const vestDetections = detections.filter(
     (d) => d.label === "Safety Vest" || d.label === "NO-Safety Vest"
   );
-  const totalVests = vestDetections.length;
   const compliantVests = vestDetections.filter((d) => d.label === "Safety Vest").length;
-  const vestRate = totalVests > 0 ? Math.round((compliantVests / totalVests) * 100) : null;
+  const violationVests = vestDetections.filter((d) => d.label === "NO-Safety Vest").length;
+
+  const hasHelmetData = helmetDetections.length > 0;
+  const hasVestData = vestDetections.length > 0;
 
   const streamActive = backendReachable && !streamError;
 
@@ -152,7 +158,7 @@ export default function LiveMonitoringPage() {
                   <p style={{ fontSize: "14px", marginBottom: "6px" }}>Backend tidak dapat dijangkau</p>
                   <p style={{ fontSize: "12px", opacity: 0.6 }}>Jalankan: <code>python app.py</code> di folder backend/</p>
                 </div>
-              ) : (
+              ) : mounted ? (
                 <img
                   src={API.videoFeed()}
                   alt="Live MJPEG stream dari kamera aktif"
@@ -160,6 +166,10 @@ export default function LiveMonitoringPage() {
                   onError={() => setStreamError(true)}
                   onLoad={() => setStreamError(false)}
                 />
+              ) : (
+                <div style={{ textAlign: "center", color: "rgba(255,255,255,0.5)", padding: "40px" }}>
+                  <p style={{ fontSize: "14px", marginBottom: "6px" }}>Memuat Aliran Video...</p>
+                </div>
               )}
               {/* Overlay: detection paused indicator */}
               {!isDetecting && backendReachable && (
@@ -180,53 +190,102 @@ export default function LiveMonitoringPage() {
             </div>
           </div>
 
-          {/* Mini metric cards: Helmet + Vest Compliance */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {toggleError && (
+            <div className="alert alert-danger" style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
+              <AlertTriangle size={14} /> {toggleError}
+            </div>
+          )}
           <div className="grid-2">
+            {/* Helmet Detection Card */}
             <div className="stat-card">
               <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                 <Shield size={13} style={{ color: "var(--color-primary)" }} />
                 Helmet Detection
               </div>
-              <div className="stat-card-value" style={{ fontSize: "20px", marginTop: "6px" }}>
-                {helmetRate !== null ? (
-                  <span className={helmetRate === 100 ? "text-success" : "text-danger"} style={{ fontWeight: 800 }}>
-                    {helmetRate}% Kepatuhan
-                  </span>
-                ) : (
-                  <span style={{ fontSize: "14px", color: "var(--color-text-muted)", fontWeight: 500 }}>
-                    Tidak Terdeteksi
-                  </span>
-                )}
-              </div>
-              <div className="text-sm text-muted mt-1">
-                {totalHelmets > 0
-                  ? `Terdeteksi: ${compliantHelmets}/${totalHelmets} Helm`
-                  : "Nol target di frame ini"}
-              </div>
+              {hasHelmetData ? (
+                <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                  <div style={{
+                    flex: 1, textAlign: "center",
+                    padding: "10px 8px",
+                    background: "var(--color-success-dim)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid rgba(22,163,74,0.15)",
+                  }}>
+                    <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
+                      {compliantHelmets}
+                    </div>
+                    <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                      Patuh
+                    </div>
+                  </div>
+                  <div style={{
+                    flex: 1, textAlign: "center",
+                    padding: "10px 8px",
+                    background: "var(--color-danger-dim)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid rgba(220,38,38,0.15)",
+                  }}>
+                    <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
+                      {violationHelmets}
+                    </div>
+                    <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                      Pelanggaran
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: "13px", color: "var(--color-text-muted)", fontWeight: 500, marginTop: "10px", fontStyle: "italic" }}>
+                  Tidak ada deteksi
+                </div>
+              )}
             </div>
+
+            {/* Safety Vest Detection Card */}
             <div className="stat-card">
               <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                 <Shield size={13} style={{ color: "var(--color-primary)" }} />
                 Safety Vest Detection
               </div>
-              <div className="stat-card-value" style={{ fontSize: "20px", marginTop: "6px" }}>
-                {vestRate !== null ? (
-                  <span className={vestRate === 100 ? "text-success" : "text-danger"} style={{ fontWeight: 800 }}>
-                    {vestRate}% Kepatuhan
-                  </span>
-                ) : (
-                  <span style={{ fontSize: "14px", color: "var(--color-text-muted)", fontWeight: 500 }}>
-                    Tidak Terdeteksi
-                  </span>
-                )}
-              </div>
-              <div className="text-sm text-muted mt-1">
-                {totalVests > 0
-                  ? `Terdeteksi: ${compliantVests}/${totalVests} Rompi`
-                  : "Nol target di frame ini"}
-              </div>
+              {hasVestData ? (
+                <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                  <div style={{
+                    flex: 1, textAlign: "center",
+                    padding: "10px 8px",
+                    background: "var(--color-success-dim)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid rgba(22,163,74,0.15)",
+                  }}>
+                    <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
+                      {compliantVests}
+                    </div>
+                    <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                      Patuh
+                    </div>
+                  </div>
+                  <div style={{
+                    flex: 1, textAlign: "center",
+                    padding: "10px 8px",
+                    background: "var(--color-danger-dim)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid rgba(220,38,38,0.15)",
+                  }}>
+                    <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
+                      {violationVests}
+                    </div>
+                    <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                      Pelanggaran
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: "13px", color: "var(--color-text-muted)", fontWeight: 500, marginTop: "10px", fontStyle: "italic" }}>
+                  Tidak ada deteksi
+                </div>
+              )}
             </div>
           </div>
+        </div>
         </div>
 
 

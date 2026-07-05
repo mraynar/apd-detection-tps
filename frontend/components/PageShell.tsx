@@ -1,6 +1,6 @@
 "use client";
 
-import { Shield, Globe } from "lucide-react";
+import { useEffect, useState } from "react";
 
 interface PageShellProps {
   title: string;
@@ -10,6 +10,13 @@ interface PageShellProps {
 }
 
 export default function PageShell({ title, subtitle, children, actions }: PageShellProps) {
+  const [avatarInitial, setAvatarInitial] = useState("?");
+
+  useEffect(() => {
+    const username = localStorage.getItem("username") || "";
+    setAvatarInitial(username.charAt(0).toUpperCase() || "?");
+  }, []);
+
   return (
     <>
       <div className="page-topbar">
@@ -19,13 +26,7 @@ export default function PageShell({ title, subtitle, children, actions }: PageSh
         </div>
         <div className="page-topbar-right">
           {actions}
-          <button className="topbar-icon-btn" title="Globe">
-            <Globe size={16} />
-          </button>
-          <button className="topbar-icon-btn" title="Security">
-            <Shield size={16} />
-          </button>
-          <div className="avatar" title="User">A</div>
+          <div className="avatar" title="User aktif">{avatarInitial}</div>
         </div>
       </div>
       <div className="page-content">

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Monitor, Camera, AlertTriangle, BarChart2, LogOut } from "lucide-react";
+import { Monitor, Camera, AlertTriangle, BarChart2, LogOut, Users } from "lucide-react";
 import { API, apiFetch } from "@/lib/api";
 import { ROLE_PAGES } from "@/lib/permissions";
 
@@ -27,6 +27,11 @@ const NAV_ITEMS = [
     href: "/analytics",
     label: "Analytics",
     Icon: BarChart2,
+  },
+  {
+    href: "/user-management",
+    label: "User Management",
+    Icon: Users,
   },
 ];
 

@@ -5,12 +5,16 @@ import { isRouteAllowed, DEFAULT_PAGE } from "./lib/permissions";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Skip static files, logos, favicon, and public assets
+  // Skip static files, logos, favicon, public assets, and video feed stream.
+  // /video_feed is excluded because it's an MJPEG stream loaded by <img> tags
+  // and authenticated via ?token= query param directly on the Flask backend.
+  // If middleware intercepts it, the <img> receives a 307 redirect → black screen.
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/logos") ||
     pathname.startsWith("/favicon.ico") ||
     pathname.startsWith("/icon.png") ||
+    pathname.startsWith("/video_feed") ||
     pathname.includes(".")
   ) {
     return NextResponse.next();
@@ -52,6 +56,6 @@ export function middleware(request: NextRequest) {
 export const config = {
   // Apply middleware to all routes except public assets and Next.js internal endpoints
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|icon.png|logos|.*\\..*).*)",
+    "/((?!api|video_feed|_next/static|_next/image|favicon.ico|icon.png|logos|.*\\..*).*)",
   ],
 };

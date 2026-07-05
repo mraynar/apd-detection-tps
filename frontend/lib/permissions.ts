@@ -1,5 +1,5 @@
 export const ROLE_PAGES: Record<string, string[]> = {
-  admin: ["/live-monitoring", "/camera-settings"],
+  admin: ["/live-monitoring", "/camera-settings", "/violation-history", "/analytics", "/user-management"],
   user: ["/violation-history", "/analytics"],
 };
 
