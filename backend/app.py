@@ -50,6 +50,7 @@ import cv2
 import csv
 import io
 import os
+import queue
 import platform
 import time
 import uuid
@@ -59,6 +60,16 @@ from functools import wraps
 import bcrypt
 from dotenv import load_dotenv
 import numpy as np
+import torch
+
+# Auto-detect best available inference device (cross-platform safe: Mac/Windows/Linux)
+if torch.cuda.is_available():
+    DEVICE = 'cuda'
+elif torch.backends.mps.is_available():
+    DEVICE = 'mps'
+else:
+    DEVICE = 'cpu'
+print(f"[INFO] Using inference device: {DEVICE}")
 
 # Load environmental variables
 load_dotenv()
@@ -156,18 +167,21 @@ def require_auth(permission=None):
 
 # ==== AI MODELS ====
 # Paths are relative to backend/ — run `python app.py` from the backend/ folder
-MODEL_HELMET_PATH = '../runs/obb/train-3/weights/best.pt'
-MODEL_VEST_PATH = '../runs/obb/runs/obb/train_vest/weights/best.pt'
+MODEL_HELMET_PATH = '../models-archive/helmet_v1_baseline_3500img.pt'
+MODEL_VEST_PATH = '../models-archive/vest_v1_baseline_500img.pt'
+MODEL_CHINSTRAP_PATH = '../runs/obb/runs/obb/train_chinstrap-2/weights/best.pt'
 
 try:
     model_helmet = YOLO(MODEL_HELMET_PATH)
     model_vest = YOLO(MODEL_VEST_PATH)
+    model_chinstrap = YOLO(MODEL_CHINSTRAP_PATH)
     models_loaded = True
 except Exception as e:
     print(f"[WARN] Could not load models: {e}")
     models_loaded = False
     model_helmet = None
     model_vest = None
+    model_chinstrap = None
 
 # ==== VIDEO SOURCE SETTINGS ====
 # USE_RTSP = False -> use laptop webcam (for testing)
@@ -222,11 +236,21 @@ CONFIDENCE_THRESHOLDS = {
     "helmet": 0.65,
     "Safety Vest": 0.4,
     "NO-Safety Vest": 0.45,
+    
+    # Chinstrap model thresholds (prefixed to avoid collision with helmet/head model)
+    # - chinstrap_bad-strap: 0.55 (conservative to reduce false violation alerts)
+    # - chinstrap_good-strap: 0.50 (standard compliant class)
+    # - chinstrap_helmet: 0.65 (conservative, matches primary helmet threshold)
+    # - chinstrap_no-helmet: 0.60 (conservative to avoid bare heads classified as no-helmet)
+    "chinstrap_bad-strap": 0.55,
+    "chinstrap_good-strap": 0.50,
+    "chinstrap_helmet": 0.65,
+    "chinstrap_no-helmet": 0.60,
 }
 DEFAULT_THRESHOLD = 0.5
 
 NMS_IOU = 0.4
-VIOLATION_CLASSES = {"head", "NO-Safety Vest"}
+VIOLATION_CLASSES = {"head", "NO-Safety Vest", "chinstrap_bad-strap", "chinstrap_no-helmet"}
 
 # Temporal smoothing: use the median violation count over recent frames
 # to avoid the number flickering between values on a per-frame basis.
@@ -258,6 +282,74 @@ stats_lock = threading.Lock()
 # Cooldown for duplicate violation saving (in seconds)
 VIOLATION_COOLDOWN_SEC = 5.0
 last_logged_violations = {}  # key: (camera_source, label), value: time.time() float
+
+# Asynchronous violation saving queue
+violation_queue = queue.Queue()
+
+def db_writer_worker():
+    """Background worker thread to commit violations from the queue to PostgreSQL."""
+    print("[INFO] Background DB writer thread started.", flush=True)
+    while True:
+        try:
+            item = violation_queue.get()
+            if item is None:
+                # Shutdown signal
+                violation_queue.task_done()
+                break
+
+            success = False
+            retries = 3
+            backoff = 2.0
+            
+            for attempt in range(retries):
+                try:
+                    with app.app_context():
+                        new_violation = Violation(
+                            id=item["id"],
+                            timestamp=item["timestamp"],
+                            label=item["label"],
+                            confidence=item["confidence"],
+                            camera_source=item["camera_source"],
+                            is_violation=True
+                        )
+                        db.session.add(new_violation)
+                        db.session.commit()
+                        
+                        # Enforce 50-record FIFO cap in the database table
+                        total_count = Violation.query.count()
+                        if total_count > 50:
+                            to_delete = (
+                                Violation.query.order_by(Violation.timestamp.asc(), Violation.created_at.asc())
+                                .limit(total_count - 50)
+                                .all()
+                            )
+                            for v in to_delete:
+                                db.session.delete(v)
+                            db.session.commit()
+                        
+                        success = True
+                        break
+                except Exception as e:
+                    print(f"[ERROR] Failed to save violation to DB (attempt {attempt+1}/{retries}): {e}", flush=True)
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+                    time.sleep(backoff)
+                    backoff *= 2.0
+
+            if not success:
+                print(f"[CRITICAL] Failed to write violation {item['id']} to database after {retries} attempts. Saving locally to failed_violations.log.", flush=True)
+                try:
+                    backup_file = os.path.join(app.root_path, "failed_violations.log")
+                    with open(backup_file, "a") as f:
+                        f.write(f"Timestamp: {item['timestamp']} | ID: {item['id']} | Label: {item['label']} | Conf: {item['confidence']} | Source: {item['camera_source']}\n")
+                except Exception as write_err:
+                    print(f"[ERROR] Failed to write to backup log file: {write_err}", flush=True)
+
+            violation_queue.task_done()
+        except Exception as e:
+            print(f"[ERROR] Exception in db_writer_worker thread loop: {e}", flush=True)
 
 
 # ==== HELPER FUNCTIONS ====
@@ -292,7 +384,7 @@ def get_threshold(label):
     return CONFIDENCE_THRESHOLDS.get(label, DEFAULT_THRESHOLD)
 
 
-def draw_violations_only(frame, results):
+def draw_violations_only(frame, results, label_prefix=""):
     """Draw bounding boxes ONLY for classes considered a violation."""
     names = results[0].names
     detected = []
@@ -304,7 +396,10 @@ def draw_violations_only(frame, results):
     for box in obb_data:
         cls_id = int(box.cls[0])
         conf = float(box.conf[0])
-        label = names[cls_id]
+        raw_label = names[cls_id]
+        
+        # Apply prefix to distinguish classes from different models (e.g. "chinstrap_helmet")
+        label = f"{label_prefix}{raw_label}" if label_prefix else raw_label
 
         if conf < get_threshold(label):
             continue
@@ -335,7 +430,7 @@ def smooth_violation_count(current_count):
 
 
 def record_detections(all_detected, now):
-    """Append violation events to PostgreSQL history and update bucket aggregates."""
+    """Append violation events to in-memory aggregates and queue database writes asynchronously."""
     hour_key = now.strftime("%Y-%m-%d %H")
     day_key = now.strftime("%Y-%m-%d")
 
@@ -343,54 +438,35 @@ def record_detections(all_detected, now):
         hourly_buckets[hour_key]["total"] += len(all_detected)
         daily_summary[day_key]["total"] += len(all_detected)
 
-        # Query and write database mutations under Flask app context
-        with app.app_context():
-            added_any = False
-            for d in all_detected:
-                if d["violation"]:
-                    camera_source = RTSP_URL if USE_RTSP else f"Webcam #{CAMERA_INDEX}"
-                    label = d["label"]
+        for d in all_detected:
+            if d["violation"]:
+                camera_source = RTSP_URL if USE_RTSP else f"Webcam #{CAMERA_INDEX}"
+                label = d["label"]
+                
+                # Cooldown check to deduplicate violations
+                cooldown_key = (camera_source, label)
+                current_time = time.time()
+                last_logged = last_logged_violations.get(cooldown_key, 0.0)
+                if current_time - last_logged < VIOLATION_COOLDOWN_SEC:
+                    continue
                     
-                    # Cooldown check to deduplicate violations
-                    cooldown_key = (camera_source, label)
-                    current_time = time.time()
-                    last_logged = last_logged_violations.get(cooldown_key, 0.0)
-                    if current_time - last_logged < VIOLATION_COOLDOWN_SEC:
-                        continue
-                        
-                    last_logged_violations[cooldown_key] = current_time
-                    
-                    event_id = str(uuid.uuid4())
-                    timestamp_str = now.isoformat()
-                    
-                    new_violation = Violation(
-                        id=event_id,
-                        timestamp=timestamp_str,
-                        label=label,
-                        confidence=d["confidence"],
-                        camera_source=camera_source,
-                        is_violation=True
-                    )
-                    db.session.add(new_violation)
-                    added_any = True
-                    
-                    hourly_buckets[hour_key]["violations"] += 1
-                    daily_summary[day_key]["violations"] += 1
-
-            if added_any:
-                db.session.commit()
-
-                # Enforce 50-record FIFO cap in the database table
-                total_count = Violation.query.count()
-                if total_count > 50:
-                    to_delete = (
-                        Violation.query.order_by(Violation.timestamp.asc(), Violation.created_at.asc())
-                        .limit(total_count - 50)
-                        .all()
-                    )
-                    for v in to_delete:
-                        db.session.delete(v)
-                    db.session.commit()
+                last_logged_violations[cooldown_key] = current_time
+                
+                event_id = str(uuid.uuid4())
+                timestamp_str = now.isoformat()
+                
+                # Queue the violation to be saved asynchronously in the background thread
+                violation_data = {
+                    "id": event_id,
+                    "timestamp": timestamp_str,
+                    "label": label,
+                    "confidence": d["confidence"],
+                    "camera_source": camera_source
+                }
+                violation_queue.put(violation_data)
+                
+                hourly_buckets[hour_key]["violations"] += 1
+                daily_summary[day_key]["violations"] += 1
 
 
 
@@ -401,8 +477,10 @@ def generate_frames():
     prev_time = time.time()
 
     while True:
+        t0 = time.time()
         with camera_lock:
             success, frame = camera.read()
+        t_cam = time.time() - t0
 
         if not success:
             # Yield a blank frame so the MJPEG stream stays alive
@@ -418,17 +496,27 @@ def generate_frames():
             time.sleep(0.033)
             continue
 
+        t_enhance_start = time.time()
         frame = enhance_frame(frame)
+        t_enhance = time.time() - t_enhance_start
 
-        results_helmet = model_helmet(frame, verbose=False, iou=NMS_IOU)
-        results_vest = model_vest(frame, verbose=False, iou=NMS_IOU)
+        t_inf_start = time.time()
+        results_helmet = model_helmet(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_vest = model_vest(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_chinstrap = model_chinstrap(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
+        t_inf = time.time() - t_inf_start
 
+        t_draw_start = time.time()
         frame, detected_helmet = draw_violations_only(frame, results_helmet)
         frame, detected_vest = draw_violations_only(frame, results_vest)
+        frame, detected_chinstrap = draw_violations_only(frame, results_chinstrap, label_prefix="chinstrap_")
+        all_detected = detected_helmet + detected_vest + detected_chinstrap
+        t_draw = time.time() - t_draw_start
 
-        all_detected = detected_helmet + detected_vest
+        t_smooth_start = time.time()
         raw_violation_count = sum(1 for d in all_detected if d["violation"])
         violation_count = smooth_violation_count(raw_violation_count)
+        t_smooth = time.time() - t_smooth_start
 
         current_time = time.time()
         fps = 1 / (current_time - prev_time) if current_time != prev_time else 0
@@ -444,9 +532,25 @@ def generate_frames():
             "last_frame_time": now.isoformat(),
         }
 
+        t_record_start = time.time()
         record_detections(all_detected, now)
+        t_record = time.time() - t_record_start
 
+        t_encode_start = time.time()
         ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        t_encode = time.time() - t_encode_start
+
+        total_frame_time = time.time() - t0
+        if total_frame_time > 0.200:
+            print(f"[SLOW FRAME DETECTED] Total: {total_frame_time*1000:.1f}ms | "
+                  f"Cam Read: {t_cam*1000:.1f}ms | "
+                  f"Enhance: {t_enhance*1000:.1f}ms | "
+                  f"YOLO Inference: {t_inf*1000:.1f}ms | "
+                  f"Draw: {t_draw*1000:.1f}ms | "
+                  f"Smooth: {t_smooth*1000:.1f}ms | "
+                  f"Record DB: {t_record*1000:.1f}ms | "
+                  f"Encode: {t_encode*1000:.1f}ms", flush=True)
+
         if ret:
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
@@ -1248,7 +1352,9 @@ def init_aggregates_from_db():
 
 
 if __name__ == '__main__':
+    # Start the asynchronous database writer thread
+    db_writer_thread = threading.Thread(target=db_writer_worker, daemon=True)
+    db_writer_thread.start()
+
     init_aggregates_from_db()
-    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
-
-
+    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True, use_reloader=False)
