@@ -1,6 +1,6 @@
 export const ROLE_PAGES: Record<string, string[]> = {
   admin: ["/live-monitoring", "/camera-settings", "/violation-history", "/analytics", "/user-management"],
-  user: ["/violation-history", "/analytics"],
+  user: ["/violation-history", "/analytics", "/live-monitoring", "/camera-settings"],
 };
 
 export const DEFAULT_PAGE: Record<string, string> = {
