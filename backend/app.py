@@ -407,15 +407,17 @@ def draw_violations_only(frame, results, label_prefix=""):
             continue
 
         is_violation = label in VIOLATION_CLASSES
+        points = box.xyxyxyxy[0].cpu().numpy().astype(int)
+        
         detected.append({
             "label": label,
             "confidence": round(conf, 2),
             "violation": is_violation,
             "is_violation": is_violation,
+            "box_points": points.tolist()
         })
 
         if is_violation:
-            points = box.xyxyxyxy[0].cpu().numpy().astype(int)
             cv2.polylines(frame, [points], isClosed=True, color=(0, 0, 255), thickness=2)
             text_pos = (int(points[0][0]), int(points[0][1]) - 10)
             cv2.putText(frame, f"{label} {conf:.2f}", text_pos,
@@ -479,9 +481,17 @@ def generate_frames():
     prev_time = time.time()
 
     while True:
+        if not USE_RTSP:
+            # Client-side webcams are uploaded to /api/detect-frame; server streaming is inactive
+            time.sleep(0.5)
+            continue
+
         t0 = time.time()
         with camera_lock:
-            success, frame = camera.read()
+            if camera and camera.isOpened():
+                success, frame = camera.read()
+            else:
+                success, frame = False, None
         t_cam = time.time() - t0
 
         if not success:
@@ -850,7 +860,7 @@ def api_camera_settings_post():
     data = request.get_json(force=True) or {}
     new_use_rtsp = data.get("use_rtsp", USE_RTSP)
     new_rtsp_url = data.get("rtsp_url", RTSP_URL).strip()
-    new_camera_index = int(data.get("camera_index", CAMERA_INDEX))
+    new_camera_index = int(data.get("camera_index", CAMERA_INDEX or 0))
 
     # Test the connection properly
     if new_use_rtsp:
@@ -863,31 +873,43 @@ def api_camera_settings_post():
                 "message": f"Gagal terhubung ke RTSP: {res['message']}"
             }), 422
     else:
-        # Check local webcam
-        test_cap = open_camera(use_rtsp=False, cam_index=new_camera_index)
-        ok = test_cap.isOpened()
-        if ok:
-            ret, _ = test_cap.read()
-            ok = ret
-        test_cap.release()
-        if not ok:
-            return jsonify({
-                "success": False,
-                "connection_status": "disconnected",
-                "message": f"Gagal terhubung ke Kamera Lokal index {new_camera_index}. Pastikan izin kamera aktif atau tutup aplikasi lain yang sedang menggunakannya."
-            }), 422
+        # For local webcams, the server doesn't check or open the physical device anymore
+        # as it is captured client-side in the browser.
+        pass
 
     # If test passed, apply the source
     with camera_lock:
         if camera:
             camera.release()
+            camera = None
+            # macOS device release delay for the old live camera
+            if not new_use_rtsp:
+                time.sleep(0.5)
+                
         USE_RTSP = new_use_rtsp
         RTSP_URL = new_rtsp_url
         CAMERA_INDEX = new_camera_index
         SELECTED_CAMERA_ID = "rtsp_0" if new_use_rtsp else f"webcam_{new_camera_index}"
-        camera = open_camera()
+        
+        # NOTE: camera_index=0 sent here is a dummy value — browser-based webcam mode doesn't 
+        # use server-side device index at all. This only exists to safely release any server-held 
+        # webcam handle from the old architecture.
+        success_open = False
+        if new_use_rtsp:
+            camera = open_camera()
+            success_open = (camera is not None and camera.isOpened())
+        else:
+            # Browser-side capture is active. Server webcam is released and stays closed.
+            success_open = True
 
-    connection_status = "connected" if (camera and camera.isOpened()) else "disconnected"
+    if not success_open:
+        return jsonify({
+            "success": False,
+            "connection_status": "no_frame",
+            "message": f"Kamera index {new_camera_index} terbuka tetapi tidak dapat membaca frame. Periksa izin kamera di System Settings atau tutup aplikasi lain yang sedang menggunakan kamera."
+        }), 422
+
+    connection_status = "connected" if (USE_RTSP and camera and camera.isOpened()) or (not USE_RTSP) else "disconnected"
 
     return jsonify({
         "success": True,
@@ -976,8 +998,129 @@ def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
         cap.release()
 
 
+def record_frame_detections(all_detected, now, camera_id=None):
+    """Logs violation events to database and updates aggregates for client-side uploads."""
+    hour_key = now.strftime("%Y-%m-%d %H")
+    day_key = now.strftime("%Y-%m-%d")
+
+    # Resolve camera source label for reporting
+    camera_source = "Client Webcam"
+    if camera_id:
+        try:
+            cam = Camera.query.get(camera_id)
+            if cam:
+                camera_source = cam.label
+        except Exception as e:
+            print(f"[ERROR] Failed to query camera label for ID {camera_id}: {e}")
+
+    with stats_lock:
+        # Update hourly/daily stats
+        if hour_key not in hourly_buckets:
+            hourly_buckets[hour_key] = {"total": 0, "violations": 0}
+        if day_key not in daily_summary:
+            daily_summary[day_key] = {"total": 0, "violations": 0}
+
+        hourly_buckets[hour_key]["total"] += len(all_detected)
+        daily_summary[day_key]["total"] += len(all_detected)
+
+        for d in all_detected:
+            if d.get("violation", False):
+                label = d["label"]
+                
+                # Cooldown check to deduplicate violations
+                cooldown_key = (camera_source, label)
+                current_time = time.time()
+                last_logged = last_logged_violations.get(cooldown_key, 0.0)
+                if current_time - last_logged < VIOLATION_COOLDOWN_SEC:
+                    continue
+                    
+                last_logged_violations[cooldown_key] = current_time
+                
+                event_id = str(uuid.uuid4())
+                timestamp_str = now.isoformat()
+                
+                violation_data = {
+                    "id": event_id,
+                    "timestamp": timestamp_str,
+                    "label": label,
+                    "confidence": d["confidence"],
+                    "camera_source": camera_source
+                }
+                violation_queue.put(violation_data)
+                
+                hourly_buckets[hour_key]["violations"] += 1
+                daily_summary[day_key]["violations"] += 1
 
 
+@app.route('/api/detect-frame', methods=['POST'])
+def api_detect_frame():
+    """
+    Receives a single JPEG frame from the browser client, runs 3 YOLO models,
+    logs any violations to the DB, and returns structured detection objects.
+    """
+    if 'image' not in request.files:
+        return jsonify({"success": False, "message": "File 'image' tidak ditemukan."}), 400
+
+    file = request.files['image']
+    camera_id = request.form.get('camera_id')
+    if camera_id:
+        try:
+            camera_id = int(camera_id)
+        except ValueError:
+            camera_id = None
+
+    # Read image
+    img_bytes = file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if frame is None:
+        return jsonify({"success": False, "message": "Gagal mendekode gambar JPEG."}), 400
+
+    if not is_detecting or not models_loaded:
+        return jsonify({
+            "success": True,
+            "detections": [],
+            "violations_count": 0
+        })
+
+    # Run inference sequence (same as generate_frames)
+    # 1. Enhance frame (auto-contrast/brightness)
+    enhanced = enhance_frame(frame)
+
+    # 2. Helmet model
+    res_helmet = model_helmet(enhanced, verbose=False)
+    _, det_helmet = draw_violations_only(enhanced, res_helmet, label_prefix="")
+
+    # 3. Vest model
+    res_vest = model_vest(enhanced, verbose=False)
+    _, det_vest = draw_violations_only(enhanced, res_vest, label_prefix="")
+
+    # 4. Chinstrap model
+    res_chinstrap = model_chinstrap(enhanced, verbose=False)
+    _, det_chinstrap = draw_violations_only(enhanced, res_chinstrap, label_prefix="chinstrap_")
+
+    # Combine detections
+    all_detected = det_helmet + det_vest + det_chinstrap
+    
+    # Save violations to database
+    now = datetime.datetime.now()
+    record_frame_detections(all_detected, now, camera_id)
+
+    violations_count = sum(1 for d in all_detected if d.get("violation", False))
+
+    # Update latest_stats for active UI polling
+    with stats_lock:
+        latest_stats["fps"] = 0  # Client-side FPS is not tracked server-side
+        latest_stats["total_detected"] = len(all_detected)
+        latest_stats["violations"] = violations_count
+        latest_stats["last_frame_time"] = now.isoformat()
+
+    return jsonify({
+        "success": True,
+        "detections": all_detected,
+        "violations_count": violations_count
+    })
 
 
 @app.route('/api/camera/test', methods=['POST'])
@@ -1074,6 +1217,7 @@ def api_my_cameras_get():
                 "use_rtsp": cam.use_rtsp,
                 "rtsp_url": cam.rtsp_url,
                 "camera_index": cam.camera_index,
+                "webcam_device_id": cam.webcam_device_id,
                 "created_at": cam.created_at.isoformat() if cam.created_at else None,
                 "updated_at": cam.updated_at.isoformat() if cam.updated_at else None,
             })
@@ -1090,6 +1234,7 @@ def api_my_cameras_get():
                 "use_rtsp": cam.use_rtsp,
                 "rtsp_url": cam.rtsp_url,
                 "camera_index": cam.camera_index,
+                "webcam_device_id": cam.webcam_device_id,
                 "created_at": cam.created_at.isoformat() if cam.created_at else None,
                 "updated_at": cam.updated_at.isoformat() if cam.updated_at else None,
             })
@@ -1115,10 +1260,13 @@ def api_my_cameras_post():
         if not rtsp_url:
             return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
         camera_index = None
+        webcam_device_id = None
         use_rtsp = True
     else:
         rtsp_url = None
-        camera_index = int(data.get("camera_index", 0))
+        # browser-side webcam does not use integer index, so it stays NULL in DB.
+        camera_index = None
+        webcam_device_id = data.get("webcam_device_id", "").strip() or None
         use_rtsp = False
         
     new_camera = Camera(
@@ -1127,7 +1275,8 @@ def api_my_cameras_post():
         source_type=source_type,
         use_rtsp=use_rtsp,
         rtsp_url=rtsp_url,
-        camera_index=camera_index
+        camera_index=camera_index,
+        webcam_device_id=webcam_device_id
     )
     db.session.add(new_camera)
     db.session.commit()
@@ -1143,6 +1292,7 @@ def api_my_cameras_post():
             "use_rtsp": new_camera.use_rtsp,
             "rtsp_url": new_camera.rtsp_url,
             "camera_index": new_camera.camera_index,
+            "webcam_device_id": new_camera.webcam_device_id,
         }
     }), 201
 
@@ -1182,14 +1332,13 @@ def api_my_cameras_put(id):
                 return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
             cam.rtsp_url = rtsp_url
         cam.camera_index = None
+        cam.webcam_device_id = None
     else:
         cam.use_rtsp = False
         cam.rtsp_url = None
-        if "camera_index" in data:
-            cam.camera_index = int(data["camera_index"])
-        elif cam.camera_index is None:
-            # Default to 0 if it was previously an RTSP camera and has no index set
-            cam.camera_index = 0
+        cam.camera_index = None  # kept NULL for browser-side webcams
+        if "webcam_device_id" in data:
+            cam.webcam_device_id = data["webcam_device_id"].strip() or None
             
     db.session.commit()
     
@@ -1204,6 +1353,7 @@ def api_my_cameras_put(id):
             "use_rtsp": cam.use_rtsp,
             "rtsp_url": cam.rtsp_url,
             "camera_index": cam.camera_index,
+            "webcam_device_id": cam.webcam_device_id,
         }
     })
 

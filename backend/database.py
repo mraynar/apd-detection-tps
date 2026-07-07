@@ -45,6 +45,7 @@ class Camera(db.Model):
     use_rtsp = Column(Boolean, default=False, nullable=False) # kept for backward compatibility
     rtsp_url = Column(String(500), nullable=True)
     camera_index = Column(Integer, nullable=True)
+    webcam_device_id = Column(String(255), nullable=True)
     
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
