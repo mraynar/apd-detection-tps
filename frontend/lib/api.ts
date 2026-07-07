@@ -24,6 +24,8 @@ export const API = {
   detectionToggle: () => `${BACKEND}/api/detection/toggle`,
   users: () => `${BACKEND}/api/users`,
   usersDetail: (id: number) => `${BACKEND}/api/users/${id}`,
+  myCameras: () => `${BACKEND}/api/my-cameras`,
+  myCamerasDetail: (id: number | string) => `${BACKEND}/api/my-cameras/${id}`,
   logout: () => `${BACKEND}/api/logout`,
   sessionVerify: () => `${BACKEND}/api/session/verify`,
 

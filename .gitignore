@@ -28,4 +28,4 @@ datasets-new/
 runs_backup_20260705/
 runs/
 models-archive/
-backup_db_*.sql
+*.dump

@@ -5,7 +5,8 @@ import PageShell from "@/components/PageShell";
 import { API, apiFetch } from "@/lib/api";
 import {
   Camera, CheckCircle, XCircle, Loader, AlertCircle,
-  Wifi, RefreshCw, Monitor, Radio, Info, ExternalLink, Copy, Check
+  Wifi, RefreshCw, Monitor, Radio, Info, ExternalLink, Copy, Check,
+  Trash2, Edit2, Play, Plus, User
 } from "lucide-react";
 
 // ---- Types ----
@@ -17,16 +18,9 @@ interface LocalCamera {
   unavailable_reason: string | null;
 }
 
-interface RtspCamera {
-  id: string;
-  label: string;
-  rtsp_url: string;
-  last_test_status: string | null;
-}
-
 interface CamerasResponse {
   local_cameras: LocalCamera[];
-  rtsp_cameras: RtspCamera[];
+  rtsp_cameras: any[];
   os: string;
 }
 
@@ -74,20 +68,28 @@ function bannerTitle(state: BannerState): string {
 
 export default function CameraSettingsPage() {
   const [mounted, setMounted] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
   const [settings, setSettings] = useState<CameraSettings | null>(null);
   const [cameras, setCameras] = useState<CamerasResponse | null>(null);
-  const [useRtsp, setUseRtsp] = useState(false);
-  const [rtspUrl, setRtspUrl] = useState("");
-  const [camIndex, setCamIndex] = useState(0);
   const [banner, setBanner] = useState<BannerState>("idle");
   const [bannerMsg, setBannerMsg] = useState("");
   const [latency, setLatency] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingCameras, setRefreshingCameras] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
   const [testSuccess, setTestSuccess] = useState(false);
   const [lastTestedUrl, setLastTestedUrl] = useState("");
+
+  // my-cameras management states
+  const [myCameras, setMyCameras] = useState<any[]>([]);
+  const [loadingMyCameras, setLoadingMyCameras] = useState(true);
+
+  // Form states for Add/Edit
+  const [formLabel, setFormLabel] = useState("");
+  const [formSourceType, setFormSourceType] = useState<"webcam" | "rtsp">("webcam");
+  const [formRtspUrl, setFormRtspUrl] = useState("");
+  const [formCamIndex, setFormCamIndex] = useState(0);
+  const [editingCamId, setEditingCamId] = useState<number | null>(null);
 
   const loadCameras = useCallback(async (silent = false) => {
     if (!silent) setRefreshingCameras(true);
@@ -105,9 +107,6 @@ export default function CameraSettingsPage() {
     try {
       const s = await apiFetch<CameraSettings>(API.cameraSettings());
       setSettings(s);
-      setUseRtsp(s.use_rtsp);
-      setRtspUrl(s.rtsp_url);
-      setCamIndex(s.camera_index);
       setBanner(s.connection_status === "connected" ? "connected" : "disconnected");
       setBannerMsg(
         s.connection_status === "connected"
@@ -124,75 +123,107 @@ export default function CameraSettingsPage() {
     }
   }, []);
 
-
+  const loadMyCameras = useCallback(async () => {
+    if (!role) return;
+    setLoadingMyCameras(true);
+    try {
+      const url = role === "admin" ? `${API.myCameras()}?all=true` : API.myCameras();
+      const list = await apiFetch<any[]>(url);
+      setMyCameras(list);
+    } catch (err) {
+      console.error("Failed to fetch my-cameras:", err);
+    } finally {
+      setLoadingMyCameras(false);
+    }
+  }, [role]);
 
   useEffect(() => {
     setMounted(true);
+    if (typeof window !== "undefined") {
+      setRole(localStorage.getItem("role"));
+    }
     loadSettings();
     loadCameras(true);
   }, [loadSettings, loadCameras]);
 
+  useEffect(() => {
+    if (role) {
+      loadMyCameras();
+    }
+  }, [role, loadMyCameras]);
+
   // ---- Handlers ----
   const handleRefreshCameras = () => loadCameras(false);
 
-  const handleCopy = () => {
-    if (!rtspUrl) return;
-    navigator.clipboard.writeText(rtspUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleEditClick = (cam: any) => {
+    setEditingCamId(cam.id);
+    setFormLabel(cam.label);
+    setFormSourceType(cam.source_type || (cam.use_rtsp ? "rtsp" : "webcam"));
+    setFormRtspUrl(cam.rtsp_url || "");
+    setFormCamIndex(cam.camera_index !== null ? cam.camera_index : 0);
   };
 
-  const handleSelectCamera = async (val: string) => {
-    let nextUseRtsp = false;
-    let nextRtspUrl = rtspUrl;
-    let nextCamIndex = camIndex;
+  const handleResetForm = () => {
+    setEditingCamId(null);
+    setFormLabel("");
+    setFormSourceType("webcam");
+    setFormRtspUrl("");
+    setFormCamIndex(0);
+    setTestSuccess(false);
+  };
 
-    if (val.startsWith("rtsp_")) {
-      nextUseRtsp = true;
-      const matchedRtsp = rtspCameras.find((r) => `rtsp_${r.rtsp_url}` === val);
-      if (matchedRtsp) {
-        nextRtspUrl = matchedRtsp.rtsp_url;
-        setRtspUrl(matchedRtsp.rtsp_url);
-      }
-      setUseRtsp(true);
-      // Let the user click Connect manually to apply RTSP
-      return;
-    } else if (val.startsWith("local_")) {
-      nextUseRtsp = false;
-      const idx = parseInt(val.replace("local_", ""), 10);
-      nextCamIndex = idx;
-      setUseRtsp(false);
-      setCamIndex(idx);
-    }
+  const handleSaveCamera = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formLabel.trim()) return;
 
     setBanner("saving");
-    setBannerMsg("Mengaktifkan kamera lokal baru...");
+    setBannerMsg(editingCamId ? "Memperbarui kamera..." : "Menambahkan kamera baru...");
 
     try {
-      const result = await apiFetch<{ success: boolean; message: string; connection_status: string }>(
-        API.cameraSettings(),
-        {
+      const payload = {
+        label: formLabel.trim(),
+        source_type: formSourceType,
+        rtsp_url: formSourceType === "rtsp" ? formRtspUrl.trim() : null,
+        camera_index: formSourceType === "webcam" ? formCamIndex : null,
+      };
+
+      if (editingCamId) {
+        await apiFetch(API.myCamerasDetail(editingCamId), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiFetch(API.myCameras(), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ use_rtsp: nextUseRtsp, rtsp_url: nextRtspUrl, camera_index: nextCamIndex }),
-        }
-      );
-      setBanner(result.success ? "connected" : "disconnected");
-      setBannerMsg(result.message);
-      if (result.success) {
-        setPreviewKey((prev) => prev + 1);
+          body: JSON.stringify(payload),
+        });
       }
-      await loadSettings();
-    } catch (err: unknown) {
+
+      setBanner("connected");
+      setBannerMsg(editingCamId ? "Kamera berhasil diperbarui." : "Kamera berhasil ditambahkan.");
+      handleResetForm();
+      await loadMyCameras();
+    } catch (err: any) {
       setBanner("error");
-      setBannerMsg("Gagal mengubah kamera: " + (err instanceof Error ? err.message : String(err)));
-      await loadSettings();
+      setBannerMsg("Gagal menyimpan kamera: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
-  const handleRtsptoggle = async (connect: boolean) => {
+  const handleDeleteCamera = async (id: number) => {
+    if (!confirm("Apakah Anda yakin ingin menghapus kamera ini?")) return;
+    try {
+      await apiFetch(API.myCamerasDetail(id), { method: "DELETE" });
+      await loadMyCameras();
+    } catch (err: any) {
+      alert("Gagal menghapus kamera: " + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleConnectCamera = async (cam: any) => {
     setBanner("saving");
-    setBannerMsg(connect ? "Menghubungkan ke RTSP..." : "Memutus koneksi RTSP...");
+    setBannerMsg(`Menghubungkan ke ${cam.label}...`);
 
     try {
       const result = await apiFetch<{ success: boolean; message: string; connection_status: string }>(
@@ -201,27 +232,26 @@ export default function CameraSettingsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            use_rtsp: connect,
-            rtsp_url: rtspUrl,
-            camera_index: camIndex
+            use_rtsp: cam.source_type === "rtsp" || cam.use_rtsp,
+            rtsp_url: cam.rtsp_url || "",
+            camera_index: cam.camera_index !== null ? cam.camera_index : 0,
           }),
         }
       );
       setBanner(result.success ? "connected" : "disconnected");
       setBannerMsg(result.message);
       if (result.success) {
-        setUseRtsp(connect);
         setPreviewKey((prev) => prev + 1);
       }
       await loadSettings();
     } catch (err: unknown) {
       setBanner("error");
-      setBannerMsg("Gagal merubah state: " + (err instanceof Error ? err.message : String(err)));
+      setBannerMsg("Gagal menghubungkan kamera: " + (err instanceof Error ? err.message : String(err)));
       await loadSettings();
     }
   };
 
-  const handleTest = async () => {
+  const handleTestForm = async () => {
     setBanner("testing");
     setBannerMsg("Menguji koneksi, harap tunggu…");
     setLatency(null);
@@ -229,14 +259,18 @@ export default function CameraSettingsPage() {
       const result = await apiFetch<TestResult>(API.cameraTest(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ use_rtsp: useRtsp, rtsp_url: rtspUrl, camera_index: camIndex }),
+        body: JSON.stringify({
+          use_rtsp: formSourceType === "rtsp",
+          rtsp_url: formSourceType === "rtsp" ? formRtspUrl : "",
+          camera_index: formSourceType === "webcam" ? formCamIndex : 0,
+        }),
       });
       setBanner(result.connection_status as BannerState);
       setBannerMsg(result.message);
       setLatency(result.latency_ms);
       if (result.success && result.connection_status === "connected") {
         setTestSuccess(true);
-        setLastTestedUrl(rtspUrl);
+        setLastTestedUrl(formRtspUrl);
       } else {
         setTestSuccess(false);
       }
@@ -247,27 +281,18 @@ export default function CameraSettingsPage() {
     }
   };
 
-  // ---- Derived state ----
   const isSpinning = banner === "testing" || banner === "saving";
   const BannerIcon = isSpinning ? Loader : banner === "connected" ? CheckCircle : XCircle;
 
   const localCameras = cameras?.local_cameras ?? [];
-  const rtspCameras = cameras?.rtsp_cameras ?? [];
   const detectedOS = cameras?.os ?? "Unknown";
   const availableLocals = localCameras.filter((c) => c.available);
-  const unavailableLocals = localCameras.filter((c) => !c.available);
 
-  // ---- Render ----
   if (loading) {
     return (
       <PageShell title="Camera & RTSP Settings" subtitle="TPS Petikemas Surabaya">
-        <div
-          style={{ padding: "48px", textAlign: "center", color: "var(--color-text-secondary)" }}
-        >
-          <Loader
-            size={24}
-            style={{ animation: "spin 1s linear infinite", marginBottom: 12 }}
-          />
+        <div style={{ padding: "48px", textAlign: "center", color: "var(--color-text-secondary)" }}>
+          <Loader size={24} style={{ animation: "spin 1s linear infinite", marginBottom: 12 }} />
           <p>Memuat pengaturan kamera…</p>
         </div>
         <style jsx global>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -277,9 +302,8 @@ export default function CameraSettingsPage() {
 
   return (
     <PageShell title="Camera & RTSP Settings" subtitle="TPS Petikemas Surabaya">
-      {/* ===== TWO-COLUMN LAYOUT ===== */}
       <div style={{ display: "flex", gap: "16px", alignItems: "flex-start" }}>
-
+        
         {/* ===== LEFT: Full-size Camera Preview ===== */}
         <div style={{ flex: "1 1 58%", minWidth: 0 }}>
           <div className="card" style={{ height: "100%" }}>
@@ -288,7 +312,6 @@ export default function CameraSettingsPage() {
                 <Camera size={15} style={{ color: "var(--color-primary)" }} />
                 Camera Preview
               </span>
-              {/* Active source badge — shows current mode */}
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <span style={{ fontSize: "11.5px", fontWeight: 600, color: "var(--color-text-secondary)" }}>
                   {settings?.use_rtsp ? "CCTV RTSP Stream" : "Local Webcam / USB"}
@@ -300,19 +323,16 @@ export default function CameraSettingsPage() {
               </div>
             </div>
             <div className="card-body" style={{ padding: 0 }}>
-              {/* Live Preview — full width, no aspect-ratio constraint so it fills card */}
-              <div
-                style={{
-                  background: "#000",
-                  borderRadius: "0 0 var(--radius-md) var(--radius-md)",
-                  overflow: "hidden",
-                  position: "relative",
-                  minHeight: "340px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
+              <div style={{
+                background: "#000",
+                borderRadius: "0 0 var(--radius-md) var(--radius-md)",
+                overflow: "hidden",
+                position: "relative",
+                minHeight: "340px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}>
                 {mounted ? (
                   <img
                     src={`${API.videoFeed()}&_t=${previewKey}`}
@@ -324,24 +344,21 @@ export default function CameraSettingsPage() {
                     Memuat Aliran Video...
                   </div>
                 )}
-                {/* Overlay label */}
-                <div
-                  style={{
-                    position: "absolute",
-                    bottom: 10,
-                    left: 10,
-                    background: "rgba(0,0,0,0.7)",
-                    color: "white",
-                    fontSize: 11,
-                    padding: "4px 10px",
-                    borderRadius: 5,
-                    backdropFilter: "blur(4px)",
-                    WebkitBackdropFilter: "blur(4px)",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 5,
-                  }}
-                >
+                <div style={{
+                  position: "absolute",
+                  bottom: 10,
+                  left: 10,
+                  background: "rgba(0,0,0,0.7)",
+                  color: "white",
+                  fontSize: 11,
+                  padding: "4px 10px",
+                  borderRadius: 5,
+                  backdropFilter: "blur(4px)",
+                  WebkitBackdropFilter: "blur(4px)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                }}>
                   <span style={{
                     width: 6, height: 6, borderRadius: "50%",
                     background: banner === "connected" ? "#22c55e" : "#ef4444",
@@ -352,19 +369,9 @@ export default function CameraSettingsPage() {
               </div>
             </div>
 
-            {/* Connection status banner — shown inside preview card, below video */}
             {banner !== "idle" && (
-              <div
-                className={`connection-banner ${bannerClass(banner)}`}
-                style={{ margin: "20px 16px 20px", borderRadius: "var(--radius-sm)" }}
-              >
-                <BannerIcon
-                  size={16}
-                  style={{
-                    flexShrink: 0,
-                    animation: isSpinning ? "spin 1s linear infinite" : undefined,
-                  }}
-                />
+              <div className={`connection-banner ${bannerClass(banner)}`} style={{ margin: "20px 16px 20px", borderRadius: "var(--radius-sm)" }}>
+                <BannerIcon size={16} style={{ flexShrink: 0, animation: isSpinning ? "spin 1s linear infinite" : undefined }} />
                 <div>
                   <div style={{ fontWeight: 600, fontSize: "13px" }}>{bannerTitle(banner)}</div>
                   <div style={{ fontSize: "12px", marginTop: 2, opacity: 0.85 }}>
@@ -378,225 +385,207 @@ export default function CameraSettingsPage() {
         </div>
 
         {/* ===== RIGHT: Settings Panel ===== */}
-        <div style={{ flex: "0 0 340px", display: "flex", flexDirection: "column", gap: "12px", marginTop: "52px" }}>
-
-          {/* Camera Selection */}
+        <div style={{ flex: "0 0 340px", display: "flex", flexDirection: "column", gap: "12px" }}>
+          
+          {/* CAMERA LIST */}
           <div className="card">
-            <div className="card-header">
-              <span className="card-title" style={{ fontSize: "13px" }}>Pemilihan Kamera</span>
+            <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="card-title" style={{ fontSize: "13px" }}>
+                {role === "admin" ? "Semua Kamera User" : "Daftar Kamera Saya"}
+              </span>
               <button
                 className="btn btn-ghost btn-sm"
-                onClick={handleRefreshCameras}
-                disabled={refreshingCameras}
-                title="Refresh daftar kamera"
-                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "11.5px", padding: "4px 8px" }}
+                onClick={loadMyCameras}
+                disabled={loadingMyCameras}
+                style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 6px", height: "auto" }}
               >
-                <RefreshCw
-                  size={12}
-                  style={{ animation: refreshingCameras ? "spin 1s linear infinite" : undefined }}
-                />
-                {refreshingCameras ? "Memindai…" : "Refresh"}
+                <RefreshCw size={12} style={{ animation: loadingMyCameras ? "spin 1s linear infinite" : undefined }} />
               </button>
             </div>
-            <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {/* OS indicator */}
-              <div style={{ fontSize: 11.5, color: "var(--color-text-muted)", display: "flex", alignItems: "center", gap: 4 }}>
-                <Monitor size={11} />
-                OS: <strong style={{ color: "var(--color-text-secondary)" }}>{detectedOS}</strong>
-                {detectedOS === "Windows" && <span>· CAP_DSHOW</span>}
-                {detectedOS === "Darwin" && <span>· AVFoundation</span>}
-              </div>
+            <div className="card-body" style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
+              {loadingMyCameras && myCameras.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "12px", color: "var(--color-text-muted)" }}>
+                  <Loader size={16} style={{ animation: "spin 1s linear infinite", display: "inline-block" }} />
+                </div>
+              ) : myCameras.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "12px", color: "var(--color-text-muted)", fontSize: "12px" }}>
+                  Belum ada kamera terdaftar.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "250px", overflowY: "auto" }}>
+                  {myCameras.map((cam) => {
+                    const isCamRtsp = cam.source_type === "rtsp" || cam.use_rtsp;
+                    const isActive = settings 
+                      ? (settings.use_rtsp === isCamRtsp && 
+                         (isCamRtsp ? settings.rtsp_url === cam.rtsp_url : settings.camera_index === cam.camera_index))
+                      : false;
 
-              <select
-                className="form-select"
-                value={useRtsp ? `rtsp_${rtspUrl}` : `local_${camIndex}`}
-                onChange={(e) => handleSelectCamera(e.target.value)}
-              >
-                <optgroup label="── Kamera Lokal ──">
-                  {availableLocals.length === 0 && unavailableLocals.length === 0 ? (
-                    <option disabled value="">(Sedang memindai kamera…)</option>
-                  ) : null}
-                  {availableLocals.map((cam) => (
-                    <option key={`local_${cam.index}`} value={`local_${cam.index}`}>{cam.label}</option>
-                  ))}
-                  {unavailableLocals.map((cam) => (
-                    <option key={`local_${cam.index}`} value={`local_${cam.index}`} disabled>
-                      ⚠ {cam.label} — Tidak dapat diakses
-                    </option>
-                  ))}
-                </optgroup>
-                {rtspCameras.length > 0 && (
-                  <optgroup label="── RTSP Tersimpan ──">
-                    {rtspCameras.map((cam) => (
-                      <option key={cam.id} value={`rtsp_${cam.rtsp_url}`}>{cam.label}</option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
-
-              {unavailableLocals.length > 0 && (
-                <div className="alert alert-warning" style={{ fontSize: "11.5px", gap: 6 }}>
-                  <Info size={13} style={{ flexShrink: 0 }} />
-                  <div>
-                    <strong>{unavailableLocals.length} kamera tidak dapat diakses.</strong>
-                    <ul style={{ margin: "3px 0 0 14px", lineHeight: 1.6 }}>
-                      {unavailableLocals.map((cam) => (
-                        <li key={cam.index}><strong>Index {cam.index}:</strong> {cam.unavailable_reason}</li>
-                      ))}
-                    </ul>
-                  </div>
+                    return (
+                      <div
+                        key={cam.id}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          padding: "8px 10px",
+                          borderRadius: "var(--radius-sm)",
+                          background: isActive ? "var(--color-primary-dim)" : "var(--color-bg-alt, #f8f9fa)",
+                          border: isActive ? "1px solid var(--color-primary)" : "1px solid var(--color-border-light, #e9ecef)",
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1, marginRight: 8 }}>
+                          <div style={{ fontSize: "12.5px", fontWeight: 600, display: "flex", alignItems: "center", gap: 4, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                            {cam.label}
+                            {role === "admin" && cam.owner_username && (
+                              <span style={{ fontSize: "10px", color: "var(--color-text-muted)", fontWeight: 400, background: "var(--color-border-light)", padding: "1px 4px", borderRadius: 3 }}>
+                                <User size={8} style={{ display: "inline", marginRight: 2 }} />
+                                {cam.owner_username}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: "11px", color: "var(--color-text-muted)", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", fontFamily: "monospace" }}>
+                            {isCamRtsp ? cam.rtsp_url : `Webcam #${cam.camera_index}`}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: "4px" }}>
+                          <button
+                            className={`btn btn-sm ${isActive ? "btn-primary" : "btn-ghost"}`}
+                            onClick={() => handleConnectCamera(cam)}
+                            title="Aktifkan kamera"
+                            style={{ padding: "4px 6px", height: "auto" }}
+                            disabled={isSpinning}
+                          >
+                            <Play size={11} />
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => handleEditClick(cam)}
+                            title="Edit"
+                            style={{ padding: "4px 6px", height: "auto" }}
+                          >
+                            <Edit2 size={11} />
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-sm text-danger"
+                            onClick={() => handleDeleteCamera(cam.id)}
+                            title="Hapus"
+                            style={{ padding: "4px 6px", height: "auto" }}
+                          >
+                            <Trash2 size={11} style={{ color: "var(--color-danger)" }} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
           </div>
 
-          {/* RTSP Configuration */}
+          {/* ADD / EDIT FORM */}
           <div className="card">
             <div className="card-header">
-              <span className="card-title" style={{ fontSize: "13px" }}>Konfigurasi RTSP</span>
-              <Radio size={14} style={{ color: useRtsp ? "var(--color-primary)" : "var(--color-text-muted)" }} />
+              <span className="card-title" style={{ fontSize: "13px" }}>
+                {editingCamId ? "Edit Detail Kamera" : "Tambah Kamera Baru"}
+              </span>
             </div>
-            <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {/* RTSP Toggle */}
+            <form onSubmit={handleSaveCamera} className="card-body" style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
               <div>
-                <label className="form-label" style={{ marginBottom: 6 }}>Mode RTSP</label>
-                <div className="toggle-wrapper">
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={useRtsp}
-                      onChange={(e) => setUseRtsp(e.target.checked)}
-                    />
-                    <span className="toggle-slider" />
-                  </label>
-                  <span className="toggle-label" style={{ fontSize: "12.5px" }}>
-                    {useRtsp ? (
-                      <><Radio size={13} style={{ display: "inline", marginRight: 4 }} />RTSP aktif (CCTV IP Camera)</>
-                    ) : (
-                      <><Monitor size={13} style={{ display: "inline", marginRight: 4 }} />Webcam / USB lokal</>
-                    )}
-                  </span>
-                </div>
-              </div>
-
-              {/* RTSP URL */}
-              <div>
-                <label className="form-label" style={{ marginBottom: 4 }}>
-                  Alamat RTSP
-                  {!useRtsp && (
-                    <span style={{ marginLeft: 6, fontSize: "10px", fontWeight: 400, color: "var(--color-text-muted)", textTransform: "none" }}>
-                      (aktifkan RTSP untuk mengedit)
-                    </span>
-                  )}
-                </label>
+                <label className="form-label" style={{ marginBottom: 4 }}>Label Kamera</label>
                 <input
                   className="form-input"
                   type="text"
-                  placeholder="rtsp://username:password@ip:port/stream"
-                  value={rtspUrl}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setRtspUrl(val);
-                    if (val !== lastTestedUrl) setTestSuccess(false);
-                  }}
-                  disabled={!useRtsp}
-                  style={{ fontFamily: "monospace", fontSize: 12 }}
+                  placeholder="Kamera Pintu Utama / Gate 1"
+                  value={formLabel}
+                  onChange={(e) => setFormLabel(e.target.value)}
+                  required
                 />
-                {useRtsp && (
-                  <div style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: 4 }}>
-                    ⚠️ Alamat RTSP TPS belum dikonfirmasi IT. Test Koneksi timeout 6 detik.
-                  </div>
-                )}
               </div>
 
-              {/* Parsed IP */}
-              {useRtsp && (
-                <div>
-                  <label className="form-label" style={{ fontSize: "10.5px", color: "var(--color-text-secondary)", marginBottom: 4 }}>
-                    Parsed IP Address
+              <div>
+                <label className="form-label" style={{ marginBottom: 4 }}>Jenis Kamera</label>
+                <div style={{ display: "flex", gap: "16px", marginTop: 4 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "12.5px", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="formSourceType"
+                      checked={formSourceType === "webcam"}
+                      onChange={() => setFormSourceType("webcam")}
+                    />
+                    Webcam Lokal
                   </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "12.5px", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="formSourceType"
+                      checked={formSourceType === "rtsp"}
+                      onChange={() => setFormSourceType("rtsp")}
+                    />
+                    CCTV RTSP
+                  </label>
+                </div>
+              </div>
+
+              {formSourceType === "rtsp" ? (
+                <div>
+                  <label className="form-label" style={{ marginBottom: 4 }}>Alamat RTSP URL</label>
                   <input
                     className="form-input"
                     type="text"
-                    readOnly
-                    value={(() => {
-                      try {
-                        const match = rtspUrl.match(/rtsp:\/\/(?:[^@\n]+@)?([^:\/\n]+)/im);
-                        return match ? `IP: ${match[1]}` : "IP: —";
-                      } catch { return "IP: —"; }
-                    })()}
-                    style={{
-                      background: "var(--color-border-light)",
-                      fontFamily: "monospace", fontSize: "12px",
-                      fontWeight: 600, color: "var(--color-text-secondary)"
-                    }}
+                    placeholder="rtsp://user:pass@ip:port/stream"
+                    value={formRtspUrl}
+                    onChange={(e) => setFormRtspUrl(e.target.value)}
+                    required={formSourceType === "rtsp"}
+                    style={{ fontFamily: "monospace", fontSize: 11 }}
                   />
+                </div>
+              ) : (
+                <div>
+                  <label className="form-label" style={{ marginBottom: 4 }}>Indeks Kamera USB</label>
+                  <select
+                    className="form-select"
+                    value={formCamIndex}
+                    onChange={(e) => setFormCamIndex(parseInt(e.target.value, 10))}
+                  >
+                    {availableLocals.length > 0 ? (
+                      availableLocals.map((cam) => (
+                        <option key={cam.index} value={cam.index}>
+                          {cam.label} (Index {cam.index})
+                        </option>
+                      ))
+                    ) : (
+                      [0, 1, 2, 3, 4].map((idx) => (
+                        <option key={idx} value={idx}>
+                          Kamera #{idx}
+                        </option>
+                      ))
+                    )}
+                  </select>
                 </div>
               )}
 
-              {/* Action Buttons */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                 <div style={{ display: "flex", gap: 8 }}>
-                  {useRtsp ? (
-                    settings?.use_rtsp && rtspUrl === settings?.rtsp_url ? (
-                      <button
-                        className="btn btn-danger"
-                        style={{ flex: 1 }}
-                        onClick={() => handleRtsptoggle(false)}
-                        disabled={isSpinning}
-                      >
-                        Disconnect RTSP
-                      </button>
-                    ) : (
-                      <button
-                        className="btn btn-primary"
-                        style={{ flex: 1 }}
-                        onClick={() => handleRtsptoggle(true)}
-                        disabled={isSpinning || !testSuccess}
-                        title={!testSuccess ? "Lakukan 'Test Koneksi' terlebih dahulu" : "Terapkan aliran RTSP"}
-                      >
-                        {!testSuccess ? "Uji Dulu" : "Hubungkan RTSP"}
-                      </button>
-                    )
-                  ) : (
-                    <button className="btn btn-outline" style={{ flex: 1 }} disabled>
-                      Kamera Lokal Aktif
-                    </button>
-                  )}
-                  <button className="btn btn-outline" onClick={handleTest} disabled={isSpinning} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                    <Wifi size={14} /> Test
+                  <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={isSpinning}>
+                    Simpan
+                  </button>
+                  <button type="button" className="btn btn-outline" onClick={handleTestForm} disabled={isSpinning} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <Wifi size={13} /> Test
                   </button>
                 </div>
-
-                {/* VLC / Copy buttons */}
-                {useRtsp && rtspUrl && (
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <a
-                      href={rtspUrl}
-                      className="btn btn-ghost btn-sm"
-                      style={{ flex: 1, justifyContent: "center", fontSize: "11.5px" }}
-                      title="Buka di VLC Media Player"
-                    >
-                      <ExternalLink size={13} /> VLC
-                    </a>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={handleCopy}
-                      style={{ flex: 1, justifyContent: "center", fontSize: "11.5px" }}
-                    >
-                      {copied ? <Check size={13} style={{ color: "var(--color-success)" }} /> : <Copy size={13} />}
-                      {copied ? "Tersalin!" : "Salin URL"}
-                    </button>
-                  </div>
+                {editingCamId && (
+                  <button type="button" className="btn btn-ghost" onClick={handleResetForm} disabled={isSpinning}>
+                    Batal Edit
+                  </button>
                 )}
               </div>
-            </div>
+            </form>
           </div>
 
-          {/* Quick Config Summary */}
+          {/* CONFIG STATUS */}
           <div className="card">
             <div className="card-header">
-              <span className="card-title" style={{ fontSize: "13px" }}>Status Konfigurasi</span>
+              <span className="card-title" style={{ fontSize: "13px" }}>Status Aliran Aktif</span>
             </div>
             <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {([
@@ -614,10 +603,7 @@ export default function CameraSettingsPage() {
           </div>
 
         </div>
-        {/* END RIGHT COLUMN */}
-
       </div>
-      {/* END TWO-COLUMN */}
 
       <style jsx global>{`
         @keyframes spin {

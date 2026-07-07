@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, text
 # Add parent directory to path so we can import from database
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database import db, User, Session as DBSession, Violation
+from database import db, User, Session as DBSession, Violation, Camera
 
 # Load environment variables
 load_dotenv()

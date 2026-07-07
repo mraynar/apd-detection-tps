@@ -19,6 +19,7 @@ class User(db.Model):
     role = Column(String(50), nullable=False)  # 'admin' or 'user'
     created_at = Column(DateTime, default=utc_now)
     sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
+    cameras = relationship("Camera", back_populates="owner", cascade="all, delete-orphan")
 
 
 class Session(db.Model):
@@ -30,6 +31,25 @@ class Session(db.Model):
     created_at = Column(DateTime, default=utc_now)
     expires_at = Column(DateTime, nullable=False)
     user = relationship("User", back_populates="sessions")
+
+
+class Camera(db.Model):
+    __tablename__ = 'cameras'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    label = Column(String(255), nullable=False)
+    
+    # source identification redesign
+    source_type = Column(String(50), default="webcam", nullable=False) # 'webcam' or 'rtsp'
+    use_rtsp = Column(Boolean, default=False, nullable=False) # kept for backward compatibility
+    rtsp_url = Column(String(500), nullable=True)
+    camera_index = Column(Integer, nullable=True)
+    
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    owner = relationship("User", back_populates="cameras")
 
 
 class Violation(db.Model):

@@ -86,7 +86,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/apd_detect
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-from database import db, User, Session as DBSession, Violation
+from database import db, User, Session as DBSession, Violation, Camera
 db.init_app(app)
 
 # ==== CENTRAL ROLE-BASED ACCESS CONTROL (RBAC) ====
@@ -101,7 +101,9 @@ ROLE_PERMISSIONS = {
     },
     "user": {
         "compliance_review",
-        "analytics"
+        "analytics",
+        "live_monitoring",
+        "camera_control"
     }
 }
 
@@ -1047,6 +1049,185 @@ def api_camera_test():
     latency_ms = round((time.time() - start) * 1000)
     result["latency_ms"] = latency_ms
     return jsonify(result)
+
+
+# ---- /api/my-cameras ----
+
+@app.route('/api/my-cameras', methods=['GET'])
+@require_auth(permission="camera_control")
+def api_my_cameras_get():
+    user_id = request.user_session["user_id"]
+    role = request.user_session["role"]
+    
+    all_param = request.args.get("all", "false").lower() == "true"
+    
+    if all_param and role == "admin":
+        cameras = db.session.query(Camera, User.username).join(User, Camera.owner_user_id == User.id).all()
+        result = []
+        for cam, username in cameras:
+            result.append({
+                "id": cam.id,
+                "owner_user_id": cam.owner_user_id,
+                "owner_username": username,
+                "label": cam.label,
+                "source_type": cam.source_type,
+                "use_rtsp": cam.use_rtsp,
+                "rtsp_url": cam.rtsp_url,
+                "camera_index": cam.camera_index,
+                "created_at": cam.created_at.isoformat() if cam.created_at else None,
+                "updated_at": cam.updated_at.isoformat() if cam.updated_at else None,
+            })
+        return jsonify(result)
+    else:
+        cameras = Camera.query.filter_by(owner_user_id=user_id).all()
+        result = []
+        for cam in cameras:
+            result.append({
+                "id": cam.id,
+                "owner_user_id": cam.owner_user_id,
+                "label": cam.label,
+                "source_type": cam.source_type,
+                "use_rtsp": cam.use_rtsp,
+                "rtsp_url": cam.rtsp_url,
+                "camera_index": cam.camera_index,
+                "created_at": cam.created_at.isoformat() if cam.created_at else None,
+                "updated_at": cam.updated_at.isoformat() if cam.updated_at else None,
+            })
+        return jsonify(result)
+
+
+@app.route('/api/my-cameras', methods=['POST'])
+@require_auth(permission="camera_control")
+def api_my_cameras_post():
+    user_id = request.user_session["user_id"]
+    data = request.get_json(force=True) or {}
+    
+    label = data.get("label", "").strip()
+    if not label:
+        return jsonify({"success": False, "message": "Label kamera tidak boleh kosong."}), 400
+        
+    source_type = data.get("source_type", "webcam").lower()
+    if source_type not in ["webcam", "rtsp"]:
+        return jsonify({"success": False, "message": "Tipe kamera tidak valid."}), 400
+        
+    if source_type == "rtsp":
+        rtsp_url = data.get("rtsp_url", "").strip()
+        if not rtsp_url:
+            return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
+        camera_index = None
+        use_rtsp = True
+    else:
+        rtsp_url = None
+        camera_index = int(data.get("camera_index", 0))
+        use_rtsp = False
+        
+    new_camera = Camera(
+        owner_user_id=user_id,
+        label=label,
+        source_type=source_type,
+        use_rtsp=use_rtsp,
+        rtsp_url=rtsp_url,
+        camera_index=camera_index
+    )
+    db.session.add(new_camera)
+    db.session.commit()
+    
+    return jsonify({
+        "success": True,
+        "message": "Kamera berhasil ditambahkan.",
+        "camera": {
+            "id": new_camera.id,
+            "owner_user_id": new_camera.owner_user_id,
+            "label": new_camera.label,
+            "source_type": new_camera.source_type,
+            "use_rtsp": new_camera.use_rtsp,
+            "rtsp_url": new_camera.rtsp_url,
+            "camera_index": new_camera.camera_index,
+        }
+    }), 201
+
+
+@app.route('/api/my-cameras/<int:id>', methods=['PUT'])
+@require_auth(permission="camera_control")
+def api_my_cameras_put(id):
+    user_id = request.user_session["user_id"]
+    role = request.user_session["role"]
+    data = request.get_json(force=True) or {}
+    
+    cam = Camera.query.get(id)
+    if not cam:
+        return jsonify({"success": False, "message": "Kamera tidak ditemukan."}), 404
+        
+    if cam.owner_user_id != user_id and role != "admin":
+        return jsonify({"success": False, "message": "Akses ditolak. Anda bukan pemilik kamera ini."}), 403
+        
+    if "label" in data:
+        label = data.get("label", "").strip()
+        if not label:
+            return jsonify({"success": False, "message": "Label kamera tidak boleh kosong."}), 400
+        cam.label = label
+        
+    if "source_type" in data:
+        source_type = data["source_type"].lower()
+        if source_type not in ["webcam", "rtsp"]:
+            return jsonify({"success": False, "message": "Tipe kamera tidak valid."}), 400
+        cam.source_type = source_type
+        
+    # Apply based on the resolved/updated source_type
+    if cam.source_type == "rtsp":
+        cam.use_rtsp = True
+        if "rtsp_url" in data:
+            rtsp_url = data["rtsp_url"].strip()
+            if not rtsp_url:
+                return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
+            cam.rtsp_url = rtsp_url
+        cam.camera_index = None
+    else:
+        cam.use_rtsp = False
+        cam.rtsp_url = None
+        if "camera_index" in data:
+            cam.camera_index = int(data["camera_index"])
+        elif cam.camera_index is None:
+            # Default to 0 if it was previously an RTSP camera and has no index set
+            cam.camera_index = 0
+            
+    db.session.commit()
+    
+    return jsonify({
+        "success": True,
+        "message": "Kamera berhasil diperbarui.",
+        "camera": {
+            "id": cam.id,
+            "owner_user_id": cam.owner_user_id,
+            "label": cam.label,
+            "source_type": cam.source_type,
+            "use_rtsp": cam.use_rtsp,
+            "rtsp_url": cam.rtsp_url,
+            "camera_index": cam.camera_index,
+        }
+    })
+
+
+@app.route('/api/my-cameras/<int:id>', methods=['DELETE'])
+@require_auth(permission="camera_control")
+def api_my_cameras_delete(id):
+    user_id = request.user_session["user_id"]
+    role = request.user_session["role"]
+    
+    cam = Camera.query.get(id)
+    if not cam:
+        return jsonify({"success": False, "message": "Kamera tidak ditemukan."}), 404
+        
+    if cam.owner_user_id != user_id and role != "admin":
+        return jsonify({"success": False, "message": "Akses ditolak. Anda bukan pemilik kamera ini."}), 403
+        
+    db.session.delete(cam)
+    db.session.commit()
+    
+    return jsonify({
+        "success": True,
+        "message": "Kamera berhasil dihapus."
+    })
 
 
 # ---- /api/violations ----
