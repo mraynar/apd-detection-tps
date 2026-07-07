@@ -1,12 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import PageShell from "@/components/PageShell";
 import { API, apiFetch } from "@/lib/api";
 import {
-  Camera, CheckCircle, XCircle, Loader, AlertCircle,
-  Wifi, RefreshCw, Monitor, Radio, Info, ExternalLink, Copy, Check,
-  Trash2, Edit2, Play, Plus, User
+  Camera, CheckCircle, XCircle, Loader,
+  Wifi, RefreshCw, Edit2, Play, Trash2, User
 } from "lucide-react";
 
 // ---- Types ----
@@ -84,12 +83,62 @@ export default function CameraSettingsPage() {
   const [myCameras, setMyCameras] = useState<any[]>([]);
   const [loadingMyCameras, setLoadingMyCameras] = useState(true);
 
+  // Browser-local webcams state
+  const [browserDevices, setBrowserDevices] = useState<MediaDeviceInfo[]>([]);
+
   // Form states for Add/Edit
   const [formLabel, setFormLabel] = useState("");
   const [formSourceType, setFormSourceType] = useState<"webcam" | "rtsp">("webcam");
   const [formRtspUrl, setFormRtspUrl] = useState("");
+  const [formWebcamDeviceId, setFormWebcamDeviceId] = useState("");
   const [formCamIndex, setFormCamIndex] = useState(0);
   const [editingCamId, setEditingCamId] = useState<number | null>(null);
+
+  // Local preview refs for browser webcam selection
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewStreamRef = useRef<MediaStream | null>(null);
+
+  // Live preview effect for the selected browser webcam
+  useEffect(() => {
+    const isWebcam = formSourceType === "webcam";
+
+    if (isWebcam && mounted) {
+      const startPreview = async () => {
+        try {
+          if (previewStreamRef.current) {
+            previewStreamRef.current.getTracks().forEach((track) => track.stop());
+            previewStreamRef.current = null;
+          }
+
+          const constraints = formWebcamDeviceId
+            ? { video: { deviceId: { exact: formWebcamDeviceId }, width: 1280, height: 720 } }
+            : { video: { width: 1280, height: 720 } };
+
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          previewStreamRef.current = stream;
+          if (previewVideoRef.current) {
+            previewVideoRef.current.srcObject = stream;
+          }
+        } catch (err) {
+          console.warn("Gagal membuka preview webcam lokal:", err);
+        }
+      };
+
+      startPreview();
+    } else {
+      if (previewStreamRef.current) {
+        previewStreamRef.current.getTracks().forEach((track) => track.stop());
+        previewStreamRef.current = null;
+      }
+    }
+
+    return () => {
+      if (previewStreamRef.current) {
+        previewStreamRef.current.getTracks().forEach((track) => track.stop());
+        previewStreamRef.current = null;
+      }
+    };
+  }, [formSourceType, formWebcamDeviceId, mounted]);
 
   const loadCameras = useCallback(async (silent = false) => {
     if (!silent) setRefreshingCameras(true);
@@ -102,6 +151,21 @@ export default function CameraSettingsPage() {
       setRefreshingCameras(false);
     }
   }, []);
+
+  const loadBrowserWebcams = useCallback(async () => {
+    try {
+      // Prompt user for camera permission to read labels
+      await navigator.mediaDevices.getUserMedia({ video: true });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter((d) => d.kind === "videoinput");
+      setBrowserDevices(videoDevices);
+      if (videoDevices.length > 0 && !formWebcamDeviceId) {
+        setFormWebcamDeviceId(videoDevices[0].deviceId);
+      }
+    } catch (err) {
+      console.warn("Failed to list browser webcams:", err);
+    }
+  }, [formWebcamDeviceId]);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -152,15 +216,23 @@ export default function CameraSettingsPage() {
     }
   }, [role, loadMyCameras]);
 
+  useEffect(() => {
+    if (mounted && formSourceType === "webcam") {
+      loadBrowserWebcams();
+    }
+  }, [mounted, formSourceType, loadBrowserWebcams]);
+
   // ---- Handlers ----
   const handleRefreshCameras = () => loadCameras(false);
 
   const handleEditClick = (cam: any) => {
     setEditingCamId(cam.id);
     setFormLabel(cam.label);
-    setFormSourceType(cam.source_type || (cam.use_rtsp ? "rtsp" : "webcam"));
+    const resolvedType = cam.source_type || (cam.use_rtsp ? "rtsp" : "webcam");
+    setFormSourceType(resolvedType);
     setFormRtspUrl(cam.rtsp_url || "");
-    setFormCamIndex(cam.camera_index !== null ? cam.camera_index : 0);
+    setFormWebcamDeviceId(cam.webcam_device_id || "");
+    setFormCamIndex(0);
   };
 
   const handleResetForm = () => {
@@ -168,6 +240,7 @@ export default function CameraSettingsPage() {
     setFormLabel("");
     setFormSourceType("webcam");
     setFormRtspUrl("");
+    setFormWebcamDeviceId("");
     setFormCamIndex(0);
     setTestSuccess(false);
   };
@@ -184,7 +257,8 @@ export default function CameraSettingsPage() {
         label: formLabel.trim(),
         source_type: formSourceType,
         rtsp_url: formSourceType === "rtsp" ? formRtspUrl.trim() : null,
-        camera_index: formSourceType === "webcam" ? formCamIndex : null,
+        webcam_device_id: formSourceType === "webcam" ? formWebcamDeviceId : null,
+        camera_index: null, // Always keep NULL in database for both client webcam and rtsp
       };
 
       if (editingCamId) {
@@ -226,6 +300,9 @@ export default function CameraSettingsPage() {
     setBannerMsg(`Menghubungkan ke ${cam.label}...`);
 
     try {
+      // NOTE: camera_index=0 sent here is a dummy value — browser-based webcam mode doesn't 
+      // use server-side device index at all. This only exists to safely release any server-held 
+      // webcam handle from the old architecture.
       const result = await apiFetch<{ success: boolean; message: string; connection_status: string }>(
         API.cameraSettings(),
         {
@@ -234,7 +311,7 @@ export default function CameraSettingsPage() {
           body: JSON.stringify({
             use_rtsp: cam.source_type === "rtsp" || cam.use_rtsp,
             rtsp_url: cam.rtsp_url || "",
-            camera_index: cam.camera_index !== null ? cam.camera_index : 0,
+            camera_index: cam.source_type === "webcam" ? 0 : 1,
           }),
         }
       );
@@ -255,38 +332,55 @@ export default function CameraSettingsPage() {
     setBanner("testing");
     setBannerMsg("Menguji koneksi, harap tunggu…");
     setLatency(null);
-    try {
-      const result = await apiFetch<TestResult>(API.cameraTest(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          use_rtsp: formSourceType === "rtsp",
-          rtsp_url: formSourceType === "rtsp" ? formRtspUrl : "",
-          camera_index: formSourceType === "webcam" ? formCamIndex : 0,
-        }),
-      });
-      setBanner(result.connection_status as BannerState);
-      setBannerMsg(result.message);
-      setLatency(result.latency_ms);
-      if (result.success && result.connection_status === "connected") {
+
+    if (formSourceType === "webcam") {
+      // Client-side local device testing
+      try {
+        const constraints = formWebcamDeviceId 
+          ? { video: { deviceId: { exact: formWebcamDeviceId } } }
+          : { video: true };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        stream.getTracks().forEach((track) => track.stop()); // close the camera device immediately
+
+        setBanner("connected");
+        setBannerMsg("Kamera lokal berhasil diakses oleh browser.");
         setTestSuccess(true);
-        setLastTestedUrl(formRtspUrl);
-      } else {
+      } catch (err: any) {
+        setBanner("error");
+        setBannerMsg("Gagal mengakses webcam lokal: " + (err.message || String(err)));
         setTestSuccess(false);
       }
-    } catch (err: unknown) {
-      setBanner("error");
-      setBannerMsg("Error: " + (err instanceof Error ? err.message : String(err)));
-      setTestSuccess(false);
+    } else {
+      // RTSP backend test
+      try {
+        const result = await apiFetch<TestResult>(API.cameraTest(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            use_rtsp: true,
+            rtsp_url: formRtspUrl,
+            camera_index: 0,
+          }),
+        });
+        setBanner(result.connection_status as BannerState);
+        setBannerMsg(result.message);
+        setLatency(result.latency_ms);
+        if (result.success && result.connection_status === "connected") {
+          setTestSuccess(true);
+          setLastTestedUrl(formRtspUrl);
+        } else {
+          setTestSuccess(false);
+        }
+      } catch (err: unknown) {
+        setBanner("error");
+        setBannerMsg("Error: " + (err instanceof Error ? err.message : String(err)));
+        setTestSuccess(false);
+      }
     }
   };
 
   const isSpinning = banner === "testing" || banner === "saving";
   const BannerIcon = isSpinning ? Loader : banner === "connected" ? CheckCircle : XCircle;
-
-  const localCameras = cameras?.local_cameras ?? [];
-  const detectedOS = cameras?.os ?? "Unknown";
-  const availableLocals = localCameras.filter((c) => c.available);
 
   if (loading) {
     return (
@@ -314,11 +408,11 @@ export default function CameraSettingsPage() {
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <span style={{ fontSize: "11.5px", fontWeight: 600, color: "var(--color-text-secondary)" }}>
-                  {settings?.use_rtsp ? "CCTV RTSP Stream" : "Local Webcam / USB"}
+                  {formSourceType === "rtsp" ? "CCTV RTSP Stream" : "Local Webcam / USB"}
                 </span>
-                <span className={`badge ${banner === "connected" ? "badge-live" : "badge-offline"}`} style={{ fontSize: "11px" }}>
-                  <span className="dot" />
-                  {banner === "connected" ? "Terhubung" : "Offline"}
+                <span className={`badge ${formSourceType === "rtsp" ? (banner === "connected" ? "badge-live" : "badge-offline") : "badge-live"}`} style={{ fontSize: "11px" }}>
+                  <span className="dot" style={{ background: formSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6" }} />
+                  {formSourceType === "rtsp" ? (banner === "connected" ? "Terhubung" : "Offline") : "Local Preview"}
                 </span>
               </div>
             </div>
@@ -334,11 +428,21 @@ export default function CameraSettingsPage() {
                 justifyContent: "center",
               }}>
                 {mounted ? (
-                  <img
-                    src={`${API.videoFeed()}&_t=${previewKey}`}
-                    alt="Preview kamera aktif"
-                    style={{ width: "100%", display: "block", maxHeight: "520px", objectFit: "contain" }}
-                  />
+                  formSourceType === "rtsp" ? (
+                    <img
+                      src={`${API.videoFeed()}&_t=${previewKey}`}
+                      alt="Preview kamera aktif"
+                      style={{ width: "100%", display: "block", maxHeight: "520px", objectFit: "contain" }}
+                    />
+                  ) : (
+                    <video
+                      ref={previewVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      style={{ width: "100%", display: "block", maxHeight: "520px", objectFit: "contain" }}
+                    />
+                  )
                 ) : (
                   <div style={{ color: "rgba(255,255,255,0.5)", fontSize: "14px", padding: "40px" }}>
                     Memuat Aliran Video...
@@ -361,10 +465,10 @@ export default function CameraSettingsPage() {
                 }}>
                   <span style={{
                     width: 6, height: 6, borderRadius: "50%",
-                    background: banner === "connected" ? "#22c55e" : "#ef4444",
+                    background: formSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6",
                     display: "inline-block"
                   }} />
-                  {settings?.use_rtsp ? `RTSP — ${settings.rtsp_url || "—"}` : `Webcam Index ${settings?.camera_index ?? 0}`}
+                  {formSourceType === "rtsp" ? `RTSP — ${formRtspUrl || "—"}` : `Live Local Preview`}
                 </div>
               </div>
             </div>
@@ -417,7 +521,7 @@ export default function CameraSettingsPage() {
                     const isCamRtsp = cam.source_type === "rtsp" || cam.use_rtsp;
                     const isActive = settings 
                       ? (settings.use_rtsp === isCamRtsp && 
-                         (isCamRtsp ? settings.rtsp_url === cam.rtsp_url : settings.camera_index === cam.camera_index))
+                         (isCamRtsp ? settings.rtsp_url === cam.rtsp_url : !settings.use_rtsp))
                       : false;
 
                     return (
@@ -444,7 +548,7 @@ export default function CameraSettingsPage() {
                             )}
                           </div>
                           <div style={{ fontSize: "11px", color: "var(--color-text-muted)", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap", fontFamily: "monospace" }}>
-                            {isCamRtsp ? cam.rtsp_url : `Webcam #${cam.camera_index}`}
+                            {isCamRtsp ? cam.rtsp_url : `Webcam ID: ${cam.webcam_device_id ? cam.webcam_device_id.substring(0, 12) + "..." : "Browser Default"}`}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: "4px" }}>
@@ -541,24 +645,20 @@ export default function CameraSettingsPage() {
                 </div>
               ) : (
                 <div>
-                  <label className="form-label" style={{ marginBottom: 4 }}>Indeks Kamera USB</label>
+                  <label className="form-label" style={{ marginBottom: 4 }}>Pilih Kamera Lokal (Browser)</label>
                   <select
                     className="form-select"
-                    value={formCamIndex}
-                    onChange={(e) => setFormCamIndex(parseInt(e.target.value, 10))}
+                    value={formWebcamDeviceId}
+                    onChange={(e) => setFormWebcamDeviceId(e.target.value)}
                   >
-                    {availableLocals.length > 0 ? (
-                      availableLocals.map((cam) => (
-                        <option key={cam.index} value={cam.index}>
-                          {cam.label} (Index {cam.index})
+                    {browserDevices.length > 0 ? (
+                      browserDevices.map((dev, idx) => (
+                        <option key={dev.deviceId || idx} value={dev.deviceId}>
+                          {dev.label || `Kamera #${idx + 1}`}
                         </option>
                       ))
                     ) : (
-                      [0, 1, 2, 3, 4].map((idx) => (
-                        <option key={idx} value={idx}>
-                          Kamera #{idx}
-                        </option>
-                      ))
+                      <option value="">Tidak ada kamera terdeteksi di browser</option>
                     )}
                   </select>
                 </div>
@@ -590,7 +690,6 @@ export default function CameraSettingsPage() {
             <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {([
                 ["Mode Aktif", settings?.use_rtsp ? "RTSP (CCTV)" : "Webcam / USB"],
-                ["Indeks Kamera", String(settings?.camera_index ?? 0)],
                 ["Status Koneksi", settings?.connection_status ?? "—"],
                 ["Camera ID", settings?.selected_camera_id ?? "—"],
               ] as [string, string][]).map(([label, value]) => (
