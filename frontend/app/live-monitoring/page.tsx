@@ -62,26 +62,29 @@ export default function LiveMonitoringPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const uploadIntervalRef = useRef<any>(null);
+  const isUploadingRef = useRef<boolean>(false);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const data = await apiFetch<StatusData>(API.status());
+      const url = activeCamera?.id ? `${API.status()}?camera_id=${activeCamera.id}` : API.status();
+      const data = await apiFetch<StatusData>(url);
       setStatus(data);
       setIsDetecting(data.is_detecting);
       setBackendReachable(true);
     } catch {
       setBackendReachable(false);
     }
-  }, []);
+  }, [activeCamera]);
 
   const fetchDetections = useCallback(async () => {
     try {
-      const data = await apiFetch<Detection[]>(API.detectionsLive());
+      const url = activeCamera?.id ? `${API.detectionsLive()}?camera_id=${activeCamera.id}` : API.detectionsLive();
+      const data = await apiFetch<Detection[]>(url);
       setDetections(data);
     } catch {
       // silently ignore
     }
-  }, []);
+  }, [activeCamera]);
 
   const loadSettingsAndCameras = useCallback(async () => {
     try {
@@ -95,11 +98,22 @@ export default function LiveMonitoringPage() {
 
       // Find active camera matching settings
       let active = null;
-      if (s.use_rtsp) {
-        active = list.find((c) => c.source_type === "rtsp" && c.rtsp_url === s.rtsp_url);
-      } else {
-        // Webcam mode — find the active webcam camera owned by user
-        active = list.find((c) => c.source_type === "webcam");
+      if (s.selected_camera_id) {
+        if (s.selected_camera_id.startsWith("rtsp_")) {
+          const cid = parseInt(s.selected_camera_id.split("rtsp_")[1], 10);
+          active = list.find((c) => c.id === cid);
+        } else if (s.selected_camera_id.startsWith("webcam_")) {
+          const cid = parseInt(s.selected_camera_id.split("webcam_")[1], 10);
+          active = list.find((c) => c.id === cid);
+        }
+      }
+      // Fallback to legacy matching if selected_camera_id has no DB id suffix
+      if (!active) {
+        if (s.use_rtsp) {
+          active = list.find((c) => c.source_type === "rtsp" && c.rtsp_url === s.rtsp_url);
+        } else {
+          active = list.find((c) => c.source_type === "webcam");
+        }
       }
       setActiveCamera(active);
     } catch (err) {
@@ -107,13 +121,19 @@ export default function LiveMonitoringPage() {
     }
   }, []);
 
-  // Initial load
+  // Initial load (runs only once on mount to avoid infinite fetch cycles)
   useEffect(() => {
     setMounted(true);
-    fetchStatus();
-    fetchDetections();
     loadSettingsAndCameras();
-  }, [fetchStatus, fetchDetections, loadSettingsAndCameras]);
+  }, [loadSettingsAndCameras]);
+
+  // Initial stats/detections trigger when active camera is resolved
+  useEffect(() => {
+    if (activeCamera) {
+      fetchStatus();
+      fetchDetections();
+    }
+  }, [activeCamera, fetchStatus, fetchDetections]);
 
   // 1-second polling for server state
   useInterval(fetchStatus, 1000);
@@ -121,7 +141,7 @@ export default function LiveMonitoringPage() {
 
   // Setup / teardown browser webcam capture
   useEffect(() => {
-    const isWebcam = settings && !settings.use_rtsp;
+    const isWebcam = activeCamera ? activeCamera.source_type === "webcam" : (settings && !settings.use_rtsp);
 
     if (isWebcam && activeCamera) {
       // Start browser getUserMedia capture
@@ -142,11 +162,11 @@ export default function LiveMonitoringPage() {
             videoRef.current.srcObject = stream;
           }
 
-          // Start uploading frames periodically (every 250ms)
+          // Start uploading frames periodically (every 400ms to reduce CPU/request backlog)
           if (uploadIntervalRef.current) {
             clearInterval(uploadIntervalRef.current);
           }
-          uploadIntervalRef.current = setInterval(uploadFrame, 250);
+          uploadIntervalRef.current = setInterval(uploadFrame, 400);
         } catch (err) {
           console.error("Gagal memulai tangkapan webcam client-side:", err);
         }
@@ -183,6 +203,7 @@ export default function LiveMonitoringPage() {
   }, [settings, activeCamera]);
 
   const uploadFrame = async () => {
+    if (isUploadingRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || video.paused || video.ended) return;
@@ -196,8 +217,12 @@ export default function LiveMonitoringPage() {
 
     oCtx.drawImage(video, 0, 0, offscreen.width, offscreen.height);
 
+    isUploadingRef.current = true;
     offscreen.toBlob(async (blob) => {
-      if (!blob) return;
+      if (!blob) {
+        isUploadingRef.current = false;
+        return;
+      }
 
       const formData = new FormData();
       formData.append("image", blob, "webcam_frame.jpg");
@@ -237,6 +262,8 @@ export default function LiveMonitoringPage() {
         }
       } catch (err) {
         console.error("Gagal mengunggah frame:", err);
+      } finally {
+        isUploadingRef.current = false;
       }
     }, "image/jpeg", 0.85);
   };
@@ -301,8 +328,11 @@ export default function LiveMonitoringPage() {
   };
 
   const exportSnapshot = async () => {
-    if (settings?.use_rtsp) {
-      const url = API.videoFeed();
+    const isRtsp = activeCamera ? activeCamera.source_type === "rtsp" : settings?.use_rtsp;
+    if (isRtsp) {
+      const url = activeCamera
+        ? `${API.videoFeed().split("/video_feed")[0]}/video_feed/${activeCamera.id}?token=${encodeURIComponent(localStorage.getItem("token") || "")}`
+        : API.videoFeed();
       window.open(url, "_blank");
     } else {
       // Local webcam snapshot from canvas
@@ -341,7 +371,8 @@ export default function LiveMonitoringPage() {
   const hasHelmetData = helmetDetections.length > 0;
   const hasVestData = vestDetections.length > 0;
 
-  const streamActive = backendReachable && (status?.stream_active || (settings && !settings.use_rtsp));
+  const isRtspActive = activeCamera ? activeCamera.source_type === "rtsp" : settings?.use_rtsp;
+  const streamActive = backendReachable && (status?.stream_active || (activeCamera && activeCamera.source_type === "webcam"));
 
   return (
     <PageShell
@@ -388,9 +419,11 @@ export default function LiveMonitoringPage() {
                   <p style={{ fontSize: "12px", opacity: 0.6 }}>Jalankan: <code>python app.py</code> di folder backend/</p>
                 </div>
               ) : mounted ? (
-                settings?.use_rtsp ? (
+                isRtspActive ? (
                   <img
-                    src={API.videoFeed()}
+                    src={activeCamera 
+                      ? `${API.videoFeed().split("/video_feed")[0]}/video_feed/${activeCamera.id}?token=${encodeURIComponent(localStorage.getItem("token") || "")}`
+                      : API.videoFeed()}
                     alt="Live MJPEG stream dari kamera aktif"
                     style={{ width: "100%", display: "block", maxHeight: "500px", objectFit: "contain" }}
                     onError={() => setStreamError(true)}
@@ -554,7 +587,7 @@ export default function LiveMonitoringPage() {
               <div className="metric-row">
                 <span className="metric-label">FPS</span>
                 <span className="metric-value-chip chip-blue">
-                  {status ? (settings?.use_rtsp ? status.fps : "Client-side") : "—"}
+                  {status ? (isRtspActive ? status.fps : "Client-side") : "—"}
                 </span>
               </div>
               <div className="metric-row">

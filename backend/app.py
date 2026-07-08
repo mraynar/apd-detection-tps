@@ -200,6 +200,110 @@ CAPTURE_HEIGHT = 1080
 # Thread lock for camera/settings mutation
 camera_lock = threading.Lock()
 
+# Thread locks and dicts for per-camera-id active capture sessions
+active_captures = {}
+captures_dict_lock = threading.Lock()
+camera_stats = {}
+camera_stats_lock = threading.Lock()
+CAPTURE_EXPIRY_SECONDS = 30
+
+# Synchronized camera opening lock to prevent race conditions on environment settings
+camera_open_lock = threading.Lock()
+
+def safe_open_video_capture(url, timeout_ms=None, api_preference=cv2.CAP_FFMPEG):
+    """
+    Synchronized wrapper to open cv2.VideoCapture with an optional timeout.
+    Uses OPENCV_FFMPEG_CAPTURE_OPTIONS to set FFMPEG-specific timeout environment variables.
+    
+    NOTE ON SCALING:
+    Using one global camera_open_lock serializes all VideoCapture openings across all threads.
+    If VideoCapture(url) hangs on a broken stream, other threads opening/connecting streams
+    will block during that window. For multi-camera environments with dozens of streams,
+    this should be optimized to use per-URL/per-IP locks rather than one global lock.
+    """
+    with camera_open_lock:
+        if timeout_ms is not None:
+            # FFMPEG timeout is in microseconds
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;tcp|timeout;{timeout_ms * 1000}"
+        else:
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+
+        try:
+            # Use CAP_FFMPEG as api_preference to ensure capture options are respected
+            cap = cv2.VideoCapture(url, api_preference)
+        finally:
+            # Reset environment variable immediately
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            
+        return cap
+
+
+def get_or_open_camera_capture(camera_id, rtsp_url):
+    current_time = time.time()
+    with captures_dict_lock:
+        if camera_id in active_captures:
+            entry = active_captures[camera_id]
+            entry["last_requested"] = current_time
+            # If the RTSP URL changed, release and reset the capture
+            if entry["rtsp_url"] != rtsp_url:
+                if entry["cap"] is not None:
+                    entry["cap"].release()
+                entry["cap"] = None
+                entry["rtsp_url"] = rtsp_url
+            return entry
+
+        # Create entry
+        entry = {
+            "cap": None,
+            "lock": threading.Lock(),
+            "last_requested": current_time,
+            "rtsp_url": rtsp_url
+        }
+        active_captures[camera_id] = entry
+        return entry
+
+def active_captures_cleanup_worker():
+    while True:
+        time.sleep(10)
+        current_time = time.time()
+        to_release = []
+        with captures_dict_lock:
+            for cam_id, entry in list(active_captures.items()):
+                if current_time - entry["last_requested"] > CAPTURE_EXPIRY_SECONDS:
+                    to_release.append((cam_id, entry))
+                    del active_captures[cam_id]
+                    
+        for cam_id, entry in to_release:
+            print(f"[RTSP] Releasing inactive stream for camera_id {cam_id}", flush=True)
+            with entry["lock"]:
+                if entry["cap"] is not None:
+                    try:
+                        entry["cap"].release()
+                    except Exception as e:
+                        print(f"[ERROR] Failed to release camera {cam_id}: {e}", flush=True)
+                    entry["cap"] = None
+
+# Start active captures cleanup daemon
+cleanup_thread = threading.Thread(target=active_captures_cleanup_worker, daemon=True)
+cleanup_thread.start()
+
+def update_camera_stats(camera_id, all_detected, fps=0):
+    if not camera_id:
+        return
+    violations_count = sum(1 for d in all_detected if d.get("violation", False))
+    now = datetime.datetime.now()
+    
+    with camera_stats_lock:
+        camera_stats[camera_id] = {
+            "fps": fps,
+            "total_detected": len(all_detected),
+            "violations": violations_count,
+            "last_frame_time": now.isoformat(),
+            "detections": all_detected,
+            "is_detecting": is_detecting,
+            "stream_active": True
+        }
+
 
 def open_camera(use_rtsp=None, rtsp_url=None, cam_index=None):
     """Open a cv2 VideoCapture based on current settings."""
@@ -569,6 +673,133 @@ def generate_frames():
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
+def generate_camera_frames(camera_id, rtsp_url):
+    """
+    Stateful camera generator that reads from the respective VideoCapture object,
+    runs YOLO detection using the correct device parameters, updates metrics,
+    and streams raw MJPEG frames.
+    """
+    entry = get_or_open_camera_capture(camera_id, rtsp_url)
+    cap_lock = entry["lock"]
+    prev_time = time.time()
+    
+    while True:
+        # Prevent inactive stream timeout by updating last_requested
+        with captures_dict_lock:
+            if camera_id not in active_captures:
+                print(f"[RTSP] Stream for camera_id {camera_id} was removed/deleted.", flush=True)
+                break
+            entry = active_captures[camera_id]
+            if entry["rtsp_url"] != rtsp_url:
+                print(f"[RTSP] Stream RTSP URL changed. Closing frame generator.", flush=True)
+                break
+            entry["last_requested"] = time.time()
+
+        t0 = time.time()
+        success = False
+        frame = None
+        
+        with cap_lock:
+            cap = entry["cap"]
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception as e:
+                        print(f"[ERROR] Failed to release capture on reopen: {e}", flush=True)
+                print(f"[RTSP] Opening stream for camera_id {camera_id}: {rtsp_url}", flush=True)
+                cap = safe_open_video_capture(rtsp_url, timeout_ms=None)
+                entry["cap"] = cap
+                
+            if cap.isOpened():
+                success, frame = cap.read()
+                
+        if not success:
+            # Yield a blank frame or sleep to keep client connection alive
+            time.sleep(0.1)
+            continue
+            
+        if not is_detecting or not models_loaded:
+            # Stream raw frame if detection is paused
+            ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            if ret:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.033)
+            continue
+
+        # Run inference (parameterized by DEVICE and NMS_IOU, exactly like legacy generate_frames)
+        enhanced = enhance_frame(frame)
+        
+        results_helmet = model_helmet(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_vest = model_vest(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
+
+        enhanced, detected_helmet = draw_violations_only(enhanced, results_helmet)
+        enhanced, detected_vest = draw_violations_only(enhanced, results_vest)
+        enhanced, detected_chinstrap = draw_violations_only(enhanced, results_chinstrap, label_prefix="chinstrap_")
+        all_detected = detected_helmet + detected_vest + detected_chinstrap
+
+        current_time = time.time()
+        fps = 1 / (current_time - prev_time) if current_time != prev_time else 0
+        prev_time = current_time
+
+        now = datetime.datetime.now()
+        
+        # Save violations to DB
+        record_frame_detections(all_detected, now, camera_id)
+
+        # Update stats
+        update_camera_stats(camera_id, all_detected, fps=round(fps, 1))
+
+        ret, buffer = cv2.imencode('.jpg', enhanced, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if ret:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        
+        time.sleep(0.01)
+
+
+@app.route('/video_feed/<int:camera_id>')
+def video_feed_camera(camera_id):
+    token = request.args.get("token")
+    if not token:
+        token = request.cookies.get("session_token")
+        
+    if not token:
+        return "Unauthorized", 401
+        
+    if token.startswith("Bearer "):
+        token = token[7:]
+        
+    now = datetime.datetime.utcnow()
+    session = DBSession.query.filter_by(token=token).first()
+    if not session or session.expires_at < now:
+        return "Unauthorized", 401
+        
+    user_role = session.role
+    allowed_permissions = ROLE_PERMISSIONS.get(user_role, set())
+    if "live_monitoring" not in allowed_permissions:
+        return "Forbidden", 403
+        
+    # Query the camera row
+    cam = Camera.query.get(camera_id)
+    if not cam:
+        return "Camera not found", 404
+        
+    # Check permissions: owner or admin
+    if cam.owner_user_id != session.user_id and user_role != "admin":
+        return "Forbidden", 403
+        
+    if cam.source_type != "rtsp":
+        return "Invalid camera type for server streaming", 400
+        
+    return Response(
+        stream_with_context(generate_camera_frames(camera_id, cam.rtsp_url)),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
 # ==== ROUTES ====
 
 @app.route('/api/login', methods=['POST'])
@@ -696,17 +927,37 @@ def stats_legacy():
 def api_status():
     """
     Returns smoothed real-time metrics.
-    network_latency_ms and model_load_pct are not measurable at this layer —
-    they are returned as null rather than fabricated numbers.
+    Supports camera_id parameterization for per-camera stats.
     """
+    camera_id = request.args.get("camera_id")
+    if camera_id:
+        try:
+            cid = int(camera_id)
+            with camera_stats_lock:
+                if cid in camera_stats:
+                    stats = camera_stats[cid]
+                    return jsonify({
+                        "fps": stats["fps"],
+                        "total_detected": stats["total_detected"],
+                        "violations": stats["violations"],
+                        "network_latency_ms": None,
+                        "model_load_pct": None,
+                        "is_detecting": stats["is_detecting"],
+                        "stream_active": stats["stream_active"],
+                    })
+        except Exception as e:
+            print(f"[ERROR] Failed status fetch for camera_id {camera_id}: {e}", flush=True)
+
+    # Fallback to legacy behavior
+    stream_active = (camera.isOpened() if camera else False) or (not USE_RTSP)
     return jsonify({
         "fps": latest_stats["fps"],
         "total_detected": latest_stats["total_objects"],
         "violations": latest_stats["violations"],
-        "network_latency_ms": None,  # Not available server-side; measure client-side if needed
-        "model_load_pct": None,       # Not exposed by ultralytics at runtime
+        "network_latency_ms": None,
+        "model_load_pct": None,
         "is_detecting": is_detecting,
-        "stream_active": camera.isOpened() if camera else False,
+        "stream_active": stream_active,
     })
 
 
@@ -715,6 +966,27 @@ def api_status():
 @require_auth(permission="live_monitoring")
 def api_detections_live():
     """Returns the detection list from the most recently processed frame."""
+    camera_id = request.args.get("camera_id")
+    if camera_id:
+        try:
+            cid = int(camera_id)
+            with camera_stats_lock:
+                if cid in camera_stats:
+                    stats = camera_stats[cid]
+                    ts = stats["last_frame_time"]
+                    detections = []
+                    for d in stats.get("detections", []):
+                        detections.append({
+                            "label": d["label"],
+                            "confidence": d["confidence"],
+                            "is_violation": d.get("is_violation", d.get("violation", False)),
+                            "timestamp": ts,
+                        })
+                    return jsonify(detections)
+        except Exception as e:
+            print(f"[ERROR] Failed live detections for camera_id {camera_id}: {e}", flush=True)
+
+    # Fallback to legacy behavior
     ts = latest_stats.get("last_frame_time") or datetime.datetime.now().isoformat()
     detections = []
     for d in latest_stats.get("detections", []):
@@ -842,7 +1114,40 @@ def api_cameras():
 @app.route('/api/camera/settings', methods=['GET'])
 @require_auth(permission="camera_control")
 def api_camera_settings_get():
-    connection_status = "connected" if (camera and camera.isOpened()) else "disconnected"
+    # LEGACY - superseded by per-camera_id architecture, kept temporarily
+    camera_id_arg = request.args.get("camera_id")
+    if camera_id_arg:
+        try:
+            cid = int(camera_id_arg)
+            cam = Camera.query.get(cid)
+            if cam:
+                # Check permission (owner or admin)
+                user_id = request.user_session["user_id"]
+                role = request.user_session["role"]
+                if cam.owner_user_id == user_id or role == "admin":
+                    # Determine active state from active_captures dict
+                    is_active = False
+                    with captures_dict_lock:
+                        if cid in active_captures:
+                            entry = active_captures[cid]
+                            is_active = (entry["cap"] is not None and entry["cap"].isOpened())
+                    
+                    return jsonify({
+                        "id": cam.id,
+                        "label": cam.label,
+                        "source_type": cam.source_type,
+                        "use_rtsp": cam.source_type == "rtsp",
+                        "rtsp_url": cam.rtsp_url,
+                        "camera_index": cam.camera_index,
+                        "webcam_device_id": cam.webcam_device_id,
+                        "connection_status": "connected" if (cam.source_type == "webcam" or is_active) else "disconnected",
+                        "selected_camera_id": f"rtsp_{cam.id}" if cam.source_type == "rtsp" else f"webcam_{cam.id}"
+                    })
+        except Exception as e:
+            print(f"[ERROR] failed settings get: {e}", flush=True)
+
+    # Fallback to legacy behavior
+    connection_status = "connected" if (USE_RTSP and camera and camera.isOpened()) or (not USE_RTSP) else "disconnected"
     return jsonify({
         "use_rtsp": USE_RTSP,
         "rtsp_url": RTSP_URL,
@@ -855,14 +1160,65 @@ def api_camera_settings_get():
 @app.route('/api/camera/settings', methods=['POST'])
 @require_auth(permission="camera_control")
 def api_camera_settings_post():
+    # LEGACY - superseded by per-camera_id architecture, kept temporarily
     global USE_RTSP, RTSP_URL, CAMERA_INDEX, SELECTED_CAMERA_ID, camera
 
     data = request.get_json(force=True) or {}
+    camera_id = data.get("camera_id")
     new_use_rtsp = data.get("use_rtsp", USE_RTSP)
     new_rtsp_url = data.get("rtsp_url", RTSP_URL).strip()
     new_camera_index = int(data.get("camera_index", CAMERA_INDEX or 0))
 
-    # Test the connection properly
+    if camera_id is not None:
+        try:
+            cid = int(camera_id)
+            cam = Camera.query.get(cid)
+            if cam:
+                # Check permission (owner or admin)
+                user_id = request.user_session["user_id"]
+                role = request.user_session["role"]
+                if cam.owner_user_id != user_id and role != "admin":
+                    return jsonify({"success": False, "message": "Forbidden"}), 403
+                
+                # If RTSP, let's open it and verify it
+                if cam.source_type == "rtsp":
+                    res = _test_rtsp_with_timeout(cam.rtsp_url)
+                    if not res["success"]:
+                        return jsonify({
+                            "success": False,
+                            "connection_status": res["connection_status"],
+                            "message": f"Gagal terhubung ke RTSP: {res['message']}"
+                        }), 422
+                    
+                    # Pre-heat the capture so it starts streaming faster
+                    get_or_open_camera_capture(cam.id, cam.rtsp_url)
+                
+                # Update legacy globals so that legacy stats endpoint / frontend compatibility
+                # won't break if they fetch status without camera_id.
+                USE_RTSP = (cam.source_type == "rtsp")
+                RTSP_URL = cam.rtsp_url or ""
+                CAMERA_INDEX = cam.camera_index or 0
+                SELECTED_CAMERA_ID = f"rtsp_{cam.id}" if USE_RTSP else f"webcam_{cam.id}"
+                
+                # Release legacy server-side webcam if any
+                with camera_lock:
+                    if camera:
+                        camera.release()
+                        camera = None
+                
+                return jsonify({
+                    "success": True,
+                    "connection_status": "connected",
+                    "message": "Kamera berhasil diterapkan dan diaktifkan.",
+                    "use_rtsp": USE_RTSP,
+                    "rtsp_url": RTSP_URL,
+                    "camera_index": CAMERA_INDEX,
+                    "camera_id": cam.id
+                })
+        except Exception as e:
+            print(f"[ERROR] Failed settings post for camera_id {camera_id}: {e}", flush=True)
+
+    # Fallback to legacy behavior
     if new_use_rtsp:
         # Check RTSP connection first using test function with timeout
         res = _test_rtsp_with_timeout(new_rtsp_url)
@@ -873,8 +1229,6 @@ def api_camera_settings_post():
                 "message": f"Gagal terhubung ke RTSP: {res['message']}"
             }), 422
     else:
-        # For local webcams, the server doesn't check or open the physical device anymore
-        # as it is captured client-side in the browser.
         pass
 
     # If test passed, apply the source
@@ -954,12 +1308,8 @@ def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
     else:
         print("[RTSP TEST] ffprobe not found — skipping pre-check")
 
-    cap = cv2.VideoCapture()
     try:
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_CONNECT_TIMEOUT_MS)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
-        cap.open(rtsp_url)
-
+        cap = safe_open_video_capture(rtsp_url, timeout_ms=5000)
         opened = cap.isOpened()
         print(f"[RTSP TEST] cap.isOpened() = {opened}")
 
@@ -968,10 +1318,7 @@ def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
             rtsp_tcp = rtsp_url.replace("rtsp://", "rtspt://", 1) if rtsp_url.startswith("rtsp://") else None
             if rtsp_tcp and rtsp_tcp != rtsp_url:
                 print(f"[RTSP TEST] Retrying with TCP: {rtsp_tcp}")
-                cap2 = cv2.VideoCapture()
-                cap2.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_CONNECT_TIMEOUT_MS)
-                cap2.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
-                cap2.open(rtsp_tcp)
+                cap2 = safe_open_video_capture(rtsp_tcp, timeout_ms=5000)
                 if cap2.isOpened():
                     ret2, _ = cap2.read()
                     cap2.release()
@@ -994,8 +1341,25 @@ def _test_rtsp_with_timeout(rtsp_url: str) -> dict:
 
         return {"success": True, "connection_status": "connected",
                 "message": "Koneksi RTSP berhasil dan frame berhasil dibaca."}
+    except Exception as exc:
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(f"[RTSP TEST] Exception occurred: {exc}\n{traceback_str}", flush=True)
+        try:
+            with open("/tmp/apd-backend.log", "a") as log_file:
+                log_file.write(f"\n[RTSP TEST] Exception occurred: {exc}\n{traceback_str}\n")
+        except Exception as log_err:
+            print(f"[RTSP TEST] Failed to write log: {log_err}", flush=True)
+        return {
+            "success": False,
+            "connection_status": "error",
+            "message": f"Exception saat test: {str(exc)}",
+        }
     finally:
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            pass
 
 
 def record_frame_detections(all_detected, now, camera_id=None):
@@ -1089,15 +1453,15 @@ def api_detect_frame():
     enhanced = enhance_frame(frame)
 
     # 2. Helmet model
-    res_helmet = model_helmet(enhanced, verbose=False)
+    res_helmet = model_helmet(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
     _, det_helmet = draw_violations_only(enhanced, res_helmet, label_prefix="")
 
     # 3. Vest model
-    res_vest = model_vest(enhanced, verbose=False)
+    res_vest = model_vest(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
     _, det_vest = draw_violations_only(enhanced, res_vest, label_prefix="")
 
     # 4. Chinstrap model
-    res_chinstrap = model_chinstrap(enhanced, verbose=False)
+    res_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
     _, det_chinstrap = draw_violations_only(enhanced, res_chinstrap, label_prefix="chinstrap_")
 
     # Combine detections
@@ -1108,6 +1472,10 @@ def api_detect_frame():
     record_frame_detections(all_detected, now, camera_id)
 
     violations_count = sum(1 for d in all_detected if d.get("violation", False))
+
+    # Update camera-specific stats
+    if camera_id:
+        update_camera_stats(camera_id, all_detected, fps=0)
 
     # Update latest_stats for active UI polling
     with stats_lock:

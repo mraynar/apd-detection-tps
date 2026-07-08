@@ -71,8 +71,11 @@ export default function ViolationHistoryPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setPage(1);
-      fetchViolations(1);
+      if (page === 1) {
+        fetchViolations(1);
+      } else {
+        setPage(1);
+      }
     }, 300);
     return () => clearTimeout(timer);
   }, [search, filterType, filterDate]);

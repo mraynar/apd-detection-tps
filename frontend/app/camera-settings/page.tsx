@@ -94,13 +94,25 @@ export default function CameraSettingsPage() {
   const [formCamIndex, setFormCamIndex] = useState(0);
   const [editingCamId, setEditingCamId] = useState<number | null>(null);
 
+  // Preview states (isolated from the form fields to prevent form reset/overwrite on connect)
+  const [previewSourceType, setPreviewSourceType] = useState<"webcam" | "rtsp">("webcam");
+  const [previewWebcamDeviceId, setPreviewWebcamDeviceId] = useState("");
+
+  // Sync form inputs to preview states so user gets live preview when filling form details
+  useEffect(() => {
+    setPreviewSourceType(formSourceType);
+    if (formWebcamDeviceId) {
+      setPreviewWebcamDeviceId(formWebcamDeviceId);
+    }
+  }, [formSourceType, formWebcamDeviceId]);
+
   // Local preview refs for browser webcam selection
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewStreamRef = useRef<MediaStream | null>(null);
 
   // Live preview effect for the selected browser webcam
   useEffect(() => {
-    const isWebcam = formSourceType === "webcam";
+    const isWebcam = previewSourceType === "webcam";
 
     if (isWebcam && mounted) {
       const startPreview = async () => {
@@ -110,8 +122,8 @@ export default function CameraSettingsPage() {
             previewStreamRef.current = null;
           }
 
-          const constraints = formWebcamDeviceId
-            ? { video: { deviceId: { exact: formWebcamDeviceId }, width: 1280, height: 720 } }
+          const constraints = previewWebcamDeviceId
+            ? { video: { deviceId: { exact: previewWebcamDeviceId }, width: 1280, height: 720 } }
             : { video: { width: 1280, height: 720 } };
 
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -138,7 +150,7 @@ export default function CameraSettingsPage() {
         previewStreamRef.current = null;
       }
     };
-  }, [formSourceType, formWebcamDeviceId, mounted]);
+  }, [previewSourceType, previewWebcamDeviceId, mounted]);
 
   const loadCameras = useCallback(async (silent = false) => {
     if (!silent) setRefreshingCameras(true);
@@ -177,6 +189,13 @@ export default function CameraSettingsPage() {
           ? "Kamera aktif terhubung."
           : "Kamera tidak terhubung saat ini."
       );
+      // Sync connected camera to preview states on page load
+      if (s) {
+        setPreviewSourceType(s.use_rtsp ? "rtsp" : "webcam");
+        if (s.webcam_device_id) {
+          setPreviewWebcamDeviceId(s.webcam_device_id);
+        }
+      }
     } catch {
       setBanner("error");
       setBannerMsg(
@@ -309,6 +328,7 @@ export default function CameraSettingsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            camera_id: cam.id,
             use_rtsp: cam.source_type === "rtsp" || cam.use_rtsp,
             rtsp_url: cam.rtsp_url || "",
             camera_index: cam.source_type === "webcam" ? 0 : 1,
@@ -319,6 +339,9 @@ export default function CameraSettingsPage() {
       setBannerMsg(result.message);
       if (result.success) {
         setPreviewKey((prev) => prev + 1);
+        // Sync connected camera details directly to preview states (form fields remain isolated)
+        setPreviewSourceType(cam.source_type);
+        setPreviewWebcamDeviceId(cam.webcam_device_id || "");
       }
       await loadSettings();
     } catch (err: unknown) {
@@ -408,11 +431,11 @@ export default function CameraSettingsPage() {
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <span style={{ fontSize: "11.5px", fontWeight: 600, color: "var(--color-text-secondary)" }}>
-                  {formSourceType === "rtsp" ? "CCTV RTSP Stream" : "Local Webcam / USB"}
+                  {previewSourceType === "rtsp" ? "CCTV RTSP Stream" : "Local Webcam / USB"}
                 </span>
-                <span className={`badge ${formSourceType === "rtsp" ? (banner === "connected" ? "badge-live" : "badge-offline") : "badge-live"}`} style={{ fontSize: "11px" }}>
-                  <span className="dot" style={{ background: formSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6" }} />
-                  {formSourceType === "rtsp" ? (banner === "connected" ? "Terhubung" : "Offline") : "Local Preview"}
+                <span className={`badge ${previewSourceType === "rtsp" ? (banner === "connected" ? "badge-live" : "badge-offline") : "badge-live"}`} style={{ fontSize: "11px" }}>
+                  <span className="dot" style={{ background: previewSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6" }} />
+                  {previewSourceType === "rtsp" ? (banner === "connected" ? "Terhubung" : "Offline") : "Local Preview"}
                 </span>
               </div>
             </div>
@@ -428,7 +451,7 @@ export default function CameraSettingsPage() {
                 justifyContent: "center",
               }}>
                 {mounted ? (
-                  formSourceType === "rtsp" ? (
+                  previewSourceType === "rtsp" ? (
                     <img
                       src={`${API.videoFeed()}&_t=${previewKey}`}
                       alt="Preview kamera aktif"
@@ -465,10 +488,10 @@ export default function CameraSettingsPage() {
                 }}>
                   <span style={{
                     width: 6, height: 6, borderRadius: "50%",
-                    background: formSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6",
+                    background: previewSourceType === "rtsp" ? (banner === "connected" ? "#22c55e" : "#ef4444") : "#3b82f6",
                     display: "inline-block"
                   }} />
-                  {formSourceType === "rtsp" ? `RTSP — ${formRtspUrl || "—"}` : `Live Local Preview`}
+                  {previewSourceType === "rtsp" ? `RTSP — ${formRtspUrl || "—"}` : `Live Local Preview`}
                 </div>
               </div>
             </div>
