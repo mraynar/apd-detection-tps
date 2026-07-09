@@ -169,8 +169,8 @@ def require_auth(permission=None):
 
 # ==== AI MODELS ====
 # Paths are relative to backend/ — run `python app.py` from the backend/ folder
-MODEL_HELMET_PATH = '../models-archive/helmet_v1_baseline_3500img.pt'
-MODEL_VEST_PATH = '../models-archive/vest_v1_baseline_500img.pt'
+MODEL_HELMET_PATH = '../models-archive/helmet_v2_merged_hardhat_6239img.pt'
+MODEL_VEST_PATH = '../models-archive/vest_v2_augmented_heavy.pt'
 MODEL_CHINSTRAP_PATH = '../runs/obb/runs/obb/train_chinstrap-2/weights/best.pt'
 
 try:
