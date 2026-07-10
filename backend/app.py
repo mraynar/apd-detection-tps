@@ -169,14 +169,15 @@ def require_auth(permission=None):
 
 # ==== AI MODELS ====
 # Paths are relative to backend/ — run `python app.py` from the backend/ folder
-MODEL_HELMET_PATH = '../models-archive/helmet_v2_merged_hardhat_6239img.pt'
-MODEL_VEST_PATH = '../models-archive/vest_v2_augmented_heavy.pt'
+MODEL_HELMET_PATH = '../models-archive/helmet_v4_sitting_sample_5001img.pt'
+MODEL_VEST_PATH = '../models-archive/vest_v4_sitting_sample_501img.pt'
 MODEL_CHINSTRAP_PATH = '../runs/obb/runs/obb/train_chinstrap-2/weights/best.pt'
+ENABLE_CHINSTRAP = False
 
 try:
     model_helmet = YOLO(MODEL_HELMET_PATH)
     model_vest = YOLO(MODEL_VEST_PATH)
-    model_chinstrap = YOLO(MODEL_CHINSTRAP_PATH)
+    model_chinstrap = YOLO(MODEL_CHINSTRAP_PATH) if ENABLE_CHINSTRAP else None
     models_loaded = True
 except Exception as e:
     print(f"[WARN] Could not load models: {e}")
@@ -619,13 +620,13 @@ def generate_frames():
         t_inf_start = time.time()
         results_helmet = model_helmet(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
         results_vest = model_vest(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
-        results_chinstrap = model_chinstrap(frame, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_chinstrap = model_chinstrap(frame, verbose=False, iou=NMS_IOU, device=DEVICE) if model_chinstrap else None
         t_inf = time.time() - t_inf_start
 
         t_draw_start = time.time()
         frame, detected_helmet = draw_violations_only(frame, results_helmet)
         frame, detected_vest = draw_violations_only(frame, results_vest)
-        frame, detected_chinstrap = draw_violations_only(frame, results_chinstrap, label_prefix="chinstrap_")
+        frame, detected_chinstrap = draw_violations_only(frame, results_chinstrap, label_prefix="chinstrap_") if results_chinstrap else (frame, [])
         all_detected = detected_helmet + detected_vest + detected_chinstrap
         t_draw = time.time() - t_draw_start
 
@@ -733,11 +734,11 @@ def generate_camera_frames(camera_id, rtsp_url):
         
         results_helmet = model_helmet(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
         results_vest = model_vest(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
-        results_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
+        results_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE) if model_chinstrap else None
 
         enhanced, detected_helmet = draw_violations_only(enhanced, results_helmet)
         enhanced, detected_vest = draw_violations_only(enhanced, results_vest)
-        enhanced, detected_chinstrap = draw_violations_only(enhanced, results_chinstrap, label_prefix="chinstrap_")
+        enhanced, detected_chinstrap = draw_violations_only(enhanced, results_chinstrap, label_prefix="chinstrap_") if results_chinstrap else (enhanced, [])
         all_detected = detected_helmet + detected_vest + detected_chinstrap
 
         current_time = time.time()
@@ -1461,8 +1462,8 @@ def api_detect_frame():
     _, det_vest = draw_violations_only(enhanced, res_vest, label_prefix="")
 
     # 4. Chinstrap model
-    res_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE)
-    _, det_chinstrap = draw_violations_only(enhanced, res_chinstrap, label_prefix="chinstrap_")
+    res_chinstrap = model_chinstrap(enhanced, verbose=False, iou=NMS_IOU, device=DEVICE) if model_chinstrap else None
+    det_chinstrap = draw_violations_only(enhanced, res_chinstrap, label_prefix="chinstrap_")[1] if res_chinstrap else []
 
     # Combine detections
     all_detected = det_helmet + det_vest + det_chinstrap
