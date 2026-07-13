@@ -33,6 +33,7 @@ interface ActiveSettings {
   selected_camera_id: string;
   connection_status: string;
   source_type?: string;
+  webcam_device_id?: string;
 }
 
 function formatTime(iso: string) {
@@ -40,6 +41,88 @@ function formatTime(iso: string) {
     return new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   } catch {
     return "--:--:--";
+  }
+}
+
+// ─── Reusable detection category card ───────────────────────────────────────
+// Always renders two counter boxes (Patuh / Pelanggaran) with 0 as the default.
+// To add a new category (Gloves, Chinstrap, etc.) just add one more instance:
+//   <DetectionCategoryCard label="Glove Detection" icon={<Shield size={13}/>} compliant={n} violations={n} />
+interface DetectionCategoryCardProps {
+  label: string;
+  icon: React.ReactNode;
+  compliant: number;
+  violations: number;
+}
+function DetectionCategoryCard({ label, icon, compliant, violations }: DetectionCategoryCardProps) {
+  return (
+    <div className="stat-card">
+      <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        {icon}
+        {label}
+      </div>
+      <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+        <div style={{
+          flex: 1, textAlign: "center",
+          padding: "10px 8px",
+          background: "var(--color-success-dim)",
+          borderRadius: "var(--radius-sm)",
+          border: "1px solid rgba(22,163,74,0.15)",
+        }}>
+          <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
+            {compliant}
+          </div>
+          <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+            Patuh
+          </div>
+        </div>
+        <div style={{
+          flex: 1, textAlign: "center",
+          padding: "10px 8px",
+          background: "var(--color-danger-dim)",
+          borderRadius: "var(--radius-sm)",
+          border: "1px solid rgba(220,38,38,0.15)",
+        }}>
+          <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
+            {violations}
+          </div>
+          <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+            Pelanggaran
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+// ────────────────────────────────────────────────────────────────────────────
+
+
+interface WebcamStreamResult {
+  stream: MediaStream;
+  fallback: boolean;
+}
+
+async function getWebcamStream(deviceId: string | null, width = 1280, height = 720): Promise<WebcamStreamResult> {
+  if (!deviceId) {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
+    return { stream, fallback: false };
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId }, width, height }
+    });
+    return { stream, fallback: false };
+  } catch (err: any) {
+    if (err.name === "OverconstrainedError" || err.name === "NotFoundError" || err.name === "NotReadableError") {
+      console.warn(`Device ${deviceId} unavailable. Falling back to default camera.`);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
+        return { stream, fallback: true };
+      } catch (fallbackErr) {
+        throw fallbackErr;
+      }
+    }
+    throw err;
   }
 }
 
@@ -51,6 +134,9 @@ export default function LiveMonitoringPage() {
   const [isDetecting, setIsDetecting] = useState(true);
   const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   const [toggleError, setToggleError] = useState("");
+
+  // Fallback warning state for the webcam stream (stable component state)
+  const [isCameraFallback, setIsCameraFallback] = useState(false);
 
   // Camera Settings state
   const [settings, setSettings] = useState<ActiveSettings | null>(null);
@@ -64,9 +150,22 @@ export default function LiveMonitoringPage() {
   const uploadIntervalRef = useRef<any>(null);
   const isUploadingRef = useRef<boolean>(false);
 
+  // Stable ref that always holds the latest activeCamera value so we can
+  // read it inside callbacks without making them declare activeCamera as a
+  // dependency (which would cause effect re-runs on every object-reference change).
+  const activeCameraRef = useRef<any>(null);
+
+  // Compact identity key: changes only when the camera actually differs.
+  // Covers: id, source_type, rtsp_url, webcam_device_id — per user requirement.
+  const activeCameraKeyRef = useRef<string>("");
+  const getCameraKey = (cam: any | null): string => {
+    if (!cam) return "null";
+    return `${cam.id ?? ""}|${cam.source_type ?? ""}|${cam.rtsp_url ?? ""}|${cam.webcam_device_id ?? ""}`;
+  };
+
   const fetchStatus = useCallback(async () => {
     try {
-      const url = activeCamera?.id ? `${API.status()}?camera_id=${activeCamera.id}` : API.status();
+      const url = (activeCamera?.id && activeCamera.id !== "preview") ? `${API.status()}?camera_id=${activeCamera.id}` : API.status();
       const data = await apiFetch<StatusData>(url);
       setStatus(data);
       setIsDetecting(data.is_detecting);
@@ -78,7 +177,7 @@ export default function LiveMonitoringPage() {
 
   const fetchDetections = useCallback(async () => {
     try {
-      const url = activeCamera?.id ? `${API.detectionsLive()}?camera_id=${activeCamera.id}` : API.detectionsLive();
+      const url = (activeCamera?.id && activeCamera.id !== "preview") ? `${API.detectionsLive()}?camera_id=${activeCamera.id}` : API.detectionsLive();
       const data = await apiFetch<Detection[]>(url);
       setDetections(data);
     } catch {
@@ -91,13 +190,43 @@ export default function LiveMonitoringPage() {
       const s = await apiFetch<ActiveSettings>(API.cameraSettings());
       setSettings(s);
 
+      // === Early-exit for preview mode ===
+      // When the Test button fired preview_only, selected_camera_id is "webcam_preview" or "rtsp_preview".
+      // Don't attempt a DB lookup (parseInt("preview") = NaN), just materialise a preview camera object.
+      const sid = s.selected_camera_id ?? "";
+      if (sid.endsWith("_preview")) {
+        const patchedId = "preview";
+        const patchedSourceType = s.use_rtsp ? "rtsp" : "webcam";
+        const patchedRtspUrl = s.rtsp_url ?? "";
+        const patchedWebcamDeviceId = s.webcam_device_id ?? "";
+        const patchedKey = `${patchedId}|${patchedSourceType}|${patchedRtspUrl}|${patchedWebcamDeviceId}`;
+        if (patchedKey !== activeCameraKeyRef.current) {
+          activeCameraKeyRef.current = patchedKey;
+          const patched = {
+            id: patchedId,
+            label: "PREVIEW CAMERA",
+            source_type: patchedSourceType,
+            rtsp_url: patchedRtspUrl,
+            webcam_device_id: patchedWebcamDeviceId,
+          };
+          activeCameraRef.current = patched;
+          setActiveCamera(patched);
+        }
+        // Also fetch myCameras so the list is populated but don't override activeCamera
+        const role = localStorage.getItem("role");
+        const url = role === "admin" ? `${API.myCameras()}?all=true` : API.myCameras();
+        const list = await apiFetch<any[]>(url);
+        setMyCameras(list);
+        return; // ← skip the normal DB-camera resolution below
+      }
+
       const role = localStorage.getItem("role");
       const url = role === "admin" ? `${API.myCameras()}?all=true` : API.myCameras();
       const list = await apiFetch<any[]>(url);
       setMyCameras(list);
 
       // Find active camera matching settings
-      let active = null;
+      let active: any = null;
       if (s.selected_camera_id) {
         if (s.selected_camera_id.startsWith("rtsp_")) {
           const cid = parseInt(s.selected_camera_id.split("rtsp_")[1], 10);
@@ -110,16 +239,79 @@ export default function LiveMonitoringPage() {
       // Fallback to legacy matching if selected_camera_id has no DB id suffix
       if (!active) {
         if (s.use_rtsp) {
-          active = list.find((c) => c.source_type === "rtsp" && c.rtsp_url === s.rtsp_url);
+          active = list.find((c: any) => c.source_type === "rtsp" && c.rtsp_url === s.rtsp_url);
         } else {
-          active = list.find((c) => c.source_type === "webcam");
+          active = list.find((c: any) => c.source_type === "webcam");
         }
       }
-      setActiveCamera(active);
+
+      // --- Stability guard: only call setActiveCamera when something meaningful changed ---
+      // This prevents the webcam useEffect from re-triggering (and killing the stream)
+      // when the underlying data is identical but the object reference is new.
+      const newKey = getCameraKey(active);
+      if (newKey !== activeCameraKeyRef.current) {
+        activeCameraKeyRef.current = newKey;
+        activeCameraRef.current = active;
+        setActiveCamera(active);
+      }
     } catch (err) {
       console.error("Failed to load active settings or cameras:", err);
     }
   }, []);
+
+  // Lightweight 3-second poll: fetch only /api/camera/settings, compare
+  // selected_camera_id. Triggers a full reload only when the camera changes.
+  // Handles the "_preview" suffix written by the Test button's preview_only POST:
+  //   - For real camera IDs (rtsp_X / webcam_X): full switch via loadSettingsAndCameras.
+  //   - For preview IDs (*_preview): keep activeCamera.id stable to avoid a null-lookup
+  //     blank screen, but swap the physical device fields (webcam_device_id / rtsp_url /
+  //     source_type) so the webcam useEffect actually opens the previewed device.
+  const pollCameraSettings = useCallback(async () => {
+    try {
+      const s = await apiFetch<ActiveSettings>(API.cameraSettings());
+      const sid = s.selected_camera_id ?? "";
+
+      if (sid.endsWith("_preview")) {
+        // Preview mode: don't try to look up a DB camera (id would be NaN).
+        // Instead construct a preview camera object directly from the settings poll response s.
+        const current = activeCameraRef.current;
+        const patchedId = "preview";
+        const patchedLabel = "PREVIEW CAMERA";
+        const patchedSourceType = s.use_rtsp ? "rtsp" : "webcam";
+        const patchedRtspUrl = s.rtsp_url ?? "";
+        const patchedWebcamDeviceId = s.webcam_device_id ?? "";
+
+        // Determine if anything actually changed
+        const patchedKey = `${patchedId}|${patchedSourceType}|${patchedRtspUrl}|${patchedWebcamDeviceId}`;
+        if (patchedKey !== activeCameraKeyRef.current) {
+          activeCameraKeyRef.current = patchedKey;
+          // Build patched camera object that has ID "preview" so render displays it as active,
+          // but sets the correct device parameters so webcam/RTSP initialization works properly.
+          const patched = {
+            id: patchedId,
+            label: patchedLabel,
+            source_type: patchedSourceType,
+            rtsp_url: patchedRtspUrl,
+            webcam_device_id: patchedWebcamDeviceId,
+          };
+          activeCameraRef.current = patched;
+          setActiveCamera(patched);
+        }
+        return;
+      }
+
+      // Normal (non-preview) path: check if selected_camera_id changed.
+      // If so, do a full reload so myCameras list is also refreshed.
+      let incomingId: number | null = null;
+      if (sid.startsWith("rtsp_")) incomingId = parseInt(sid.split("rtsp_")[1], 10);
+      else if (sid.startsWith("webcam_")) incomingId = parseInt(sid.split("webcam_")[1], 10);
+
+      const currentId = activeCameraRef.current?.id ?? null;
+      if (incomingId !== currentId) {
+        await loadSettingsAndCameras();
+      }
+    } catch { /* non-critical: next poll will retry */ }
+  }, [loadSettingsAndCameras]);
 
   // Initial load (runs only once on mount to avoid infinite fetch cycles)
   useEffect(() => {
@@ -135,9 +327,10 @@ export default function LiveMonitoringPage() {
     }
   }, [activeCamera, fetchStatus, fetchDetections]);
 
-  // 1-second polling for server state
+  // 1-second polling for server state; 3-second polling for camera selection changes
   useInterval(fetchStatus, 1000);
   useInterval(fetchDetections, 1000);
+  useInterval(pollCameraSettings, 3000);
 
   // Setup / teardown browser webcam capture
   useEffect(() => {
@@ -150,13 +343,11 @@ export default function LiveMonitoringPage() {
           if (streamRef.current) {
             streamRef.current.getTracks().forEach((t) => t.stop());
           }
+          setIsCameraFallback(false);
 
-          const constraints = activeCamera.webcam_device_id
-            ? { video: { deviceId: { exact: activeCamera.webcam_device_id }, width: 1280, height: 720 } }
-            : { video: { width: 1280, height: 720 } };
-
-          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          const { stream, fallback } = await getWebcamStream(activeCamera.webcam_device_id, 1280, 720);
           streamRef.current = stream;
+          setIsCameraFallback(fallback);
 
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
@@ -169,6 +360,7 @@ export default function LiveMonitoringPage() {
           uploadIntervalRef.current = setInterval(uploadFrame, 400);
         } catch (err) {
           console.error("Gagal memulai tangkapan webcam client-side:", err);
+          setIsCameraFallback(false);
         }
       };
 
@@ -179,6 +371,7 @@ export default function LiveMonitoringPage() {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
+      setIsCameraFallback(false);
       if (uploadIntervalRef.current) {
         clearInterval(uploadIntervalRef.current);
         uploadIntervalRef.current = null;
@@ -200,7 +393,7 @@ export default function LiveMonitoringPage() {
         uploadIntervalRef.current = null;
       }
     };
-  }, [settings, activeCamera]);
+  }, [activeCamera]);  // 'settings' removed: not needed, was causing spurious re-runs
 
   const uploadFrame = async () => {
     if (isUploadingRef.current) return;
@@ -330,7 +523,7 @@ export default function LiveMonitoringPage() {
   const exportSnapshot = async () => {
     const isRtsp = activeCamera ? activeCamera.source_type === "rtsp" : settings?.use_rtsp;
     if (isRtsp) {
-      const url = activeCamera
+      const url = (activeCamera && activeCamera.id !== "preview")
         ? `${API.videoFeed().split("/video_feed")[0]}/video_feed/${activeCamera.id}?token=${encodeURIComponent(localStorage.getItem("token") || "")}`
         : API.videoFeed();
       window.open(url, "_blank");
@@ -370,6 +563,10 @@ export default function LiveMonitoringPage() {
 
   const hasHelmetData = helmetDetections.length > 0;
   const hasVestData = vestDetections.length > 0;
+
+  // `hasHelmetData` and `hasVestData` retained for potential future conditional logic;
+  // DetectionCategoryCard itself always renders 0/0 as standby even when unused.
+  void hasHelmetData; void hasVestData;
 
   const isRtspActive = activeCamera ? activeCamera.source_type === "rtsp" : settings?.use_rtsp;
   const streamActive = backendReachable && (status?.stream_active || (activeCamera && activeCamera.source_type === "webcam"));
@@ -421,7 +618,7 @@ export default function LiveMonitoringPage() {
               ) : mounted ? (
                 isRtspActive ? (
                   <img
-                    src={activeCamera 
+                    src={(activeCamera && activeCamera.id !== "preview") 
                       ? `${API.videoFeed().split("/video_feed")[0]}/video_feed/${activeCamera.id}?token=${encodeURIComponent(localStorage.getItem("token") || "")}`
                       : API.videoFeed()}
                     alt="Live MJPEG stream dari kamera aktif"
@@ -450,6 +647,23 @@ export default function LiveMonitoringPage() {
                         objectFit: "contain",
                       }}
                     />
+                    {isCameraFallback && (
+                      <div style={{
+                        position: "absolute",
+                        top: 12,
+                        right: 12,
+                        background: "rgba(245,158,11,0.95)",
+                        color: "white",
+                        padding: "6px 12px",
+                        borderRadius: "6px",
+                        fontSize: "11px",
+                        fontWeight: "bold",
+                        zIndex: 10,
+                        boxShadow: "0 2px 4px rgba(0,0,0,0.3)",
+                      }}>
+                        ⚠️ Menggunakan Kamera Cadangan (Kamera Utama Tidak Tersedia)
+                      </div>
+                    )}
                   </div>
                 )
               ) : (
@@ -484,93 +698,21 @@ export default function LiveMonitoringPage() {
               </div>
             )}
             <div className="grid-2">
-              {/* Helmet Detection Card */}
-              <div className="stat-card">
-                <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <Shield size={13} style={{ color: "var(--color-primary)" }} />
-                  Helmet Detection
-                </div>
-                {hasHelmetData ? (
-                  <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
-                    <div style={{
-                      flex: 1, textAlign: "center",
-                      padding: "10px 8px",
-                      background: "var(--color-success-dim)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid rgba(22,163,74,0.15)",
-                    }}>
-                      <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
-                        {compliantHelmets}
-                      </div>
-                      <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
-                        Patuh
-                      </div>
-                    </div>
-                    <div style={{
-                      flex: 1, textAlign: "center",
-                      padding: "10px 8px",
-                      background: "var(--color-danger-dim)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid rgba(220,38,38,0.15)",
-                    }}>
-                      <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
-                        {violationHelmets}
-                      </div>
-                      <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
-                        Pelanggaran
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ fontSize: "13px", color: "var(--color-text-muted)", fontWeight: 500, marginTop: "10px", fontStyle: "italic" }}>
-                    Tidak ada deteksi
-                  </div>
-                )}
-              </div>
+              {/* Helmet Detection Card — always visible; shows 0/0 on standby */}
+              <DetectionCategoryCard
+                label="Helmet Detection"
+                icon={<Shield size={13} style={{ color: "var(--color-primary)" }} />}
+                compliant={compliantHelmets}
+                violations={violationHelmets}
+              />
 
-              {/* Safety Vest Detection Card */}
-              <div className="stat-card">
-                <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <Shield size={13} style={{ color: "var(--color-primary)" }} />
-                  Safety Vest Detection
-                </div>
-                {hasVestData ? (
-                  <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
-                    <div style={{
-                      flex: 1, textAlign: "center",
-                      padding: "10px 8px",
-                      background: "var(--color-success-dim)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid rgba(22,163,74,0.15)",
-                    }}>
-                      <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
-                        {compliantVests}
-                      </div>
-                      <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
-                        Patuh
-                      </div>
-                    </div>
-                    <div style={{
-                      flex: 1, textAlign: "center",
-                      padding: "10px 8px",
-                      background: "var(--color-danger-dim)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid rgba(220,38,38,0.15)",
-                    }}>
-                      <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
-                        {violationVests}
-                      </div>
-                      <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
-                        Pelanggaran
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ fontSize: "13px", color: "var(--color-text-muted)", fontWeight: 500, marginTop: "10px", fontStyle: "italic" }}>
-                    Tidak ada deteksi
-                  </div>
-                )}
-              </div>
+              {/* Safety Vest Detection Card — always visible; shows 0/0 on standby */}
+              <DetectionCategoryCard
+                label="Safety Vest Detection"
+                icon={<Shield size={13} style={{ color: "var(--color-primary)" }} />}
+                compliant={compliantVests}
+                violations={violationVests}
+              />
             </div>
           </div>
         </div>
@@ -635,7 +777,7 @@ export default function LiveMonitoringPage() {
               {detections.length === 0 ? (
                 <div className="empty-state" style={{ padding: "24px" }}>
                   <div className="empty-state-icon"><Eye size={28} /></div>
-                  <p style={{ fontSize: "12px" }}>Tidak ada deteksi pada frame ini</p>
+                  <p style={{ fontSize: "12px" }}>Menunggu frame deteksi…</p>
                 </div>
               ) : (
                 detections.map((d, i) => (

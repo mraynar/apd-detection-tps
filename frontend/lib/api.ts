@@ -67,15 +67,13 @@ export async function apiFetch<T>(url: string, opts?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
+    // Parse server-provided message first (if available), so it's never silently swallowed
+    let serverMessage: string | null = null;
     try {
       const errorBody = await res.json();
-      if (errorBody && errorBody.message) {
-        throw new Error(errorBody.message);
-      }
-    } catch {
-      // Fallback if not JSON or doesn't have message
-    }
-    throw new Error(`API error ${res.status}: ${url}`);
+      if (errorBody?.message) serverMessage = errorBody.message;
+    } catch { /* ignore JSON parse failures */ }
+    throw new Error(serverMessage ?? `API error ${res.status}: ${url}`);
   }
   return res.json();
 }

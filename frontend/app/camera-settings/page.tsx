@@ -29,6 +29,7 @@ interface CameraSettings {
   camera_index: number;
   selected_camera_id: string;
   connection_status: string;
+  webcam_device_id?: string;
 }
 
 interface TestResult {
@@ -65,6 +66,35 @@ function bannerTitle(state: BannerState): string {
   }[state];
 }
 
+interface WebcamStreamResult {
+  stream: MediaStream;
+  fallback: boolean;
+}
+
+async function getWebcamStream(deviceId: string | null, width = 1280, height = 720): Promise<WebcamStreamResult> {
+  if (!deviceId) {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
+    return { stream, fallback: false };
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId }, width, height }
+    });
+    return { stream, fallback: false };
+  } catch (err: any) {
+    if (err.name === "OverconstrainedError" || err.name === "NotFoundError" || err.name === "NotReadableError") {
+      console.warn(`Device ${deviceId} unavailable. Falling back to default camera.`);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
+        return { stream, fallback: true };
+      } catch (fallbackErr) {
+        throw fallbackErr;
+      }
+    }
+    throw err;
+  }
+}
+
 export default function CameraSettingsPage() {
   const [mounted, setMounted] = useState(false);
   const [role, setRole] = useState<string | null>(null);
@@ -94,6 +124,9 @@ export default function CameraSettingsPage() {
   const [formCamIndex, setFormCamIndex] = useState(0);
   const [editingCamId, setEditingCamId] = useState<number | null>(null);
 
+  // Preview fallback warning state (stable, only set on preview change)
+  const [isPreviewFallback, setIsPreviewFallback] = useState(false);
+
   // Preview states (isolated from the form fields to prevent form reset/overwrite on connect)
   const [previewSourceType, setPreviewSourceType] = useState<"webcam" | "rtsp">("webcam");
   const [previewWebcamDeviceId, setPreviewWebcamDeviceId] = useState("");
@@ -121,18 +154,18 @@ export default function CameraSettingsPage() {
             previewStreamRef.current.getTracks().forEach((track) => track.stop());
             previewStreamRef.current = null;
           }
+          setIsPreviewFallback(false);
 
-          const constraints = previewWebcamDeviceId
-            ? { video: { deviceId: { exact: previewWebcamDeviceId }, width: 1280, height: 720 } }
-            : { video: { width: 1280, height: 720 } };
-
-          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          const { stream, fallback } = await getWebcamStream(previewWebcamDeviceId, 1280, 720);
           previewStreamRef.current = stream;
+          setIsPreviewFallback(fallback);
+
           if (previewVideoRef.current) {
             previewVideoRef.current.srcObject = stream;
           }
         } catch (err) {
           console.warn("Gagal membuka preview webcam lokal:", err);
+          setIsPreviewFallback(false);
         }
       };
 
@@ -142,6 +175,7 @@ export default function CameraSettingsPage() {
         previewStreamRef.current.getTracks().forEach((track) => track.stop());
         previewStreamRef.current = null;
       }
+      setIsPreviewFallback(false);
     }
 
     return () => {
@@ -347,7 +381,8 @@ export default function CameraSettingsPage() {
     } catch (err: unknown) {
       setBanner("error");
       setBannerMsg("Gagal menghubungkan kamera: " + (err instanceof Error ? err.message : String(err)));
-      await loadSettings();
+      // Wrap secondary loadSettings to prevent uncaught rejection from suppressing the error banner above
+      try { await loadSettings(); } catch { /* ignore secondary failure while backend is restarting */ }
     }
   };
 
@@ -359,15 +394,30 @@ export default function CameraSettingsPage() {
     if (formSourceType === "webcam") {
       // Client-side local device testing
       try {
-        const constraints = formWebcamDeviceId 
-          ? { video: { deviceId: { exact: formWebcamDeviceId } } }
-          : { video: true };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const { stream, fallback } = await getWebcamStream(formWebcamDeviceId);
         stream.getTracks().forEach((track) => track.stop()); // close the camera device immediately
 
-        setBanner("connected");
-        setBannerMsg("Kamera lokal berhasil diakses oleh browser.");
-        setTestSuccess(true);
+        if (fallback) {
+          setBanner("error");
+          setBannerMsg("Koneksi berhasil dibuka, namun kamera pilihan tidak ditemukan. Menggunakan kamera cadangan browser.");
+          setTestSuccess(false);
+        } else {
+          setBanner("connected");
+          setBannerMsg("Kamera lokal berhasil diakses oleh browser.");
+          setTestSuccess(true);
+          // Drive Live Monitoring preview without persisting to DB (preview_only)
+          try {
+            await apiFetch(API.cameraSettings(), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                preview_only: true,
+                use_rtsp: false,
+                webcam_device_id: formWebcamDeviceId,
+              }),
+            });
+          } catch { /* non-critical; Live Monitoring will pick up on next poll */ }
+        }
       } catch (err: any) {
         setBanner("error");
         setBannerMsg("Gagal mengakses webcam lokal: " + (err.message || String(err)));
@@ -391,6 +441,18 @@ export default function CameraSettingsPage() {
         if (result.success && result.connection_status === "connected") {
           setTestSuccess(true);
           setLastTestedUrl(formRtspUrl);
+          // Drive Live Monitoring preview without persisting to DB (preview_only)
+          try {
+            await apiFetch(API.cameraSettings(), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                preview_only: true,
+                use_rtsp: true,
+                rtsp_url: formRtspUrl,
+              }),
+            });
+          } catch { /* non-critical; Live Monitoring will pick up on next poll */ }
         } else {
           setTestSuccess(false);
         }
@@ -469,6 +531,25 @@ export default function CameraSettingsPage() {
                 ) : (
                   <div style={{ color: "rgba(255,255,255,0.5)", fontSize: "14px", padding: "40px" }}>
                     Memuat Aliran Video...
+                  </div>
+                )}
+                {isPreviewFallback && previewSourceType === "webcam" && (
+                  <div style={{
+                    position: "absolute",
+                    top: 10,
+                    left: 10,
+                    background: "rgba(245,158,11,0.9)",
+                    color: "white",
+                    fontSize: "11px",
+                    fontWeight: "bold",
+                    padding: "6px 12px",
+                    borderRadius: "6px",
+                    backdropFilter: "blur(4px)",
+                    WebkitBackdropFilter: "blur(4px)",
+                    zIndex: 10,
+                    boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+                  }}>
+                    ⚠️ Kamera pilihan tidak tersedia. Menggunakan kamera cadangan.
                   </div>
                 )}
                 <div style={{

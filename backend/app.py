@@ -169,9 +169,9 @@ def require_auth(permission=None):
 
 # ==== AI MODELS ====
 # Paths are relative to backend/ — run `python app.py` from the backend/ folder
-MODEL_HELMET_PATH = '../models-archive/helmet_v4_sitting_sample_5001img.pt'
-MODEL_VEST_PATH = '../models-archive/vest_v4_sitting_sample_501img.pt'
-MODEL_CHINSTRAP_PATH = '../runs/obb/runs/obb/train_chinstrap-2/weights/best.pt'
+MODEL_HELMET_PATH = '../models-archive/helmet_v5_safetyhelmet_5936img.pt'
+MODEL_VEST_PATH = '../models-archive/vest_v5_cleaned_2936img.pt'
+MODEL_CHINSTRAP_PATH = '../runs/chinstrap_v1/weights/best.pt'
 ENABLE_CHINSTRAP = False
 
 try:
@@ -193,6 +193,7 @@ USE_RTSP = False
 CAMERA_INDEX = 0
 RTSP_URL = "rtsp://username:password@camera_ip:port/stream"
 SELECTED_CAMERA_ID = "webcam_0"  # logical ID for the currently active source
+WEBCAM_DEVICE_ID = ""  # physical device ID for local webcam preview
 
 # Target webcam capture resolution
 CAPTURE_WIDTH = 1920
@@ -1155,6 +1156,7 @@ def api_camera_settings_get():
         "camera_index": CAMERA_INDEX,
         "selected_camera_id": SELECTED_CAMERA_ID,
         "connection_status": connection_status,
+        "webcam_device_id": WEBCAM_DEVICE_ID,
     })
 
 
@@ -1162,13 +1164,33 @@ def api_camera_settings_get():
 @require_auth(permission="camera_control")
 def api_camera_settings_post():
     # LEGACY - superseded by per-camera_id architecture, kept temporarily
-    global USE_RTSP, RTSP_URL, CAMERA_INDEX, SELECTED_CAMERA_ID, camera
+    global USE_RTSP, RTSP_URL, CAMERA_INDEX, SELECTED_CAMERA_ID, WEBCAM_DEVICE_ID, camera
 
     data = request.get_json(force=True) or {}
     camera_id = data.get("camera_id")
     new_use_rtsp = data.get("use_rtsp", USE_RTSP)
     new_rtsp_url = data.get("rtsp_url", RTSP_URL).strip()
     new_camera_index = int(data.get("camera_index", CAMERA_INDEX or 0))
+
+    # === preview_only: session-only preview update for the "Test" button ===
+    # Updates global streaming state so Live Monitoring reflects the tested camera
+    # without touching the database or changing the user's saved camera configuration.
+    if data.get("preview_only"):
+        with camera_lock:
+            if camera:
+                camera.release()
+                camera = None
+            USE_RTSP = bool(new_use_rtsp)
+            RTSP_URL = new_rtsp_url
+            WEBCAM_DEVICE_ID = data.get("webcam_device_id", "")
+            SELECTED_CAMERA_ID = "rtsp_preview" if USE_RTSP else "webcam_preview"
+            if USE_RTSP:
+                camera = open_camera(use_rtsp=True, rtsp_url=RTSP_URL)
+        return jsonify({
+            "success": True,
+            "connection_status": "preview",
+            "message": "Preview kamera diperbarui (sesi saja, tidak disimpan ke database).",
+        })
 
     if camera_id is not None:
         try:

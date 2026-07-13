@@ -1,13 +1,3 @@
-#!/usr/bin/env bash
-# ============================================================
-# start.sh - Menjalankan backend (Flask) dan/atau frontend (Next.js)
-#
-# Penggunaan:
-#   ./start.sh              -> jalankan backend + frontend (mode normal)
-#   ./start.sh --frontend   -> jalankan frontend saja (backend/kamera mati)
-#
-# Hentikan: Ctrl+C (semua proses yang aktif ikut berhenti)
-# ============================================================
 
 set -e
 
