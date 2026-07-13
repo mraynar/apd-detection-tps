@@ -30,3 +30,5 @@ runs/
 #models-archive/
 *.dump
 backend/yolov8n-obb.pt
+datasets/
+runs_archive/
