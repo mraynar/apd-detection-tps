@@ -32,5 +32,6 @@ runs/
 backend/yolov8n-obb.pt
 datasets/
 runs_archive/
-datasets/
-runs_archive/
+
+# Windows service log output
+logs/

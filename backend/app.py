@@ -82,7 +82,14 @@ CORS(app, resources={r"/*": {
 }}, supports_credentials=True)
 
 # ==== DATABASE CONFIGURATION ====
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/apd_detection")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit(
+        "\n[FATAL] DATABASE_URL belum di-set.\n"
+        "Copy backend/.env.example ke backend/.env dan isi sesuai "
+        "kredensial PostgreSQL lokal Anda.\n"
+        "Contoh: DATABASE_URL=postgresql://postgres:password@localhost:5432/apd_detection\n"
+    )
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -961,6 +968,13 @@ def api_status():
         "is_detecting": is_detecting,
         "stream_active": stream_active,
     })
+
+
+# ---- /health (no auth — liveness probe for service monitors) ----
+@app.route('/health')
+def health_check():
+    """Unauthenticated liveness endpoint. Returns 200 if the server process is up."""
+    return jsonify({"status": "ok", "service": "apd-detection-backend"})
 
 
 # ---- /api/detections/live ----
