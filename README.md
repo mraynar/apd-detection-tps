@@ -468,29 +468,6 @@ kamera Safari atau Chrome.
 
 ---
 
-## Known Issues dan Catatan Teknis
-
-Port 5000 bentrok dengan AirPlay Receiver di macOS, itu sebabnya backend
-menggunakan port 5001.
-
-Continuity Camera (Mac dan iPhone yang berdekatan) bisa otomatis berpindah ke
-kamera iPhone saat menguji webcam. Kalau kamera yang muncul bukan webcam laptop,
-matikan Continuity Camera di System Settings Mac dan di iPhone.
-
-Dataset training tidak di-push ke GitHub karena ukurannya besar. Lihat isi
-.gitignore, folder dataset/, VEST-SAFETY/, datasets-new/, dan runs_backup_*
-sengaja dikecualikan.
-
-Akurasi deteksi menurun pada kondisi CCTV jarak jauh dengan pencahayaan minim.
-Sedang diperbaiki lewat data augmentation dan penambahan dataset. Lihat progress
-training di training_log.txt.
-
-Mode start.sh menjalankan backend lewat python app.py (dev server Flask), bukan
-lewat Waitress. Ini disengaja untuk kemudahan debug saat development, dan
-terpisah dari run_production.py yang dipakai oleh background service.
-
----
-
 ## Requirements
 
 - Python 3.11 atau lebih baru (sudah diuji di versi 3.14)
