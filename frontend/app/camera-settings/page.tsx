@@ -123,6 +123,8 @@ export default function CameraSettingsPage() {
   const [formWebcamDeviceId, setFormWebcamDeviceId] = useState("");
   const [formCamIndex, setFormCamIndex] = useState(0);
   const [editingCamId, setEditingCamId] = useState<number | null>(null);
+  // Track the RTSP URL as it was when editing started — used to detect URL changes.
+  const [originalRtspUrl, setOriginalRtspUrl] = useState("");
 
   // Preview fallback warning state (stable, only set on preview change)
   const [isPreviewFallback, setIsPreviewFallback] = useState(false);
@@ -138,6 +140,12 @@ export default function CameraSettingsPage() {
       setPreviewWebcamDeviceId(formWebcamDeviceId);
     }
   }, [formSourceType, formWebcamDeviceId]);
+
+  // Reset testSuccess whenever the RTSP URL field changes so user must re-test.
+  useEffect(() => {
+    setTestSuccess(false);
+    setLastTestedUrl("");
+  }, [formRtspUrl]);
 
   // Local preview refs for browser webcam selection
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -284,8 +292,10 @@ export default function CameraSettingsPage() {
     const resolvedType = cam.source_type || (cam.use_rtsp ? "rtsp" : "webcam");
     setFormSourceType(resolvedType);
     setFormRtspUrl(cam.rtsp_url || "");
+    setOriginalRtspUrl(cam.rtsp_url || ""); // snapshot URL at edit start
     setFormWebcamDeviceId(cam.webcam_device_id || "");
     setFormCamIndex(0);
+    setTestSuccess(false); // require re-test if URL is changed
   };
 
   const handleResetForm = () => {
@@ -293,6 +303,7 @@ export default function CameraSettingsPage() {
     setFormLabel("");
     setFormSourceType("webcam");
     setFormRtspUrl("");
+    setOriginalRtspUrl("");
     setFormWebcamDeviceId("");
     setFormCamIndex(0);
     setTestSuccess(false);
@@ -305,29 +316,58 @@ export default function CameraSettingsPage() {
     setBanner("saving");
     setBannerMsg(editingCamId ? "Memperbarui kamera..." : "Menambahkan kamera baru...");
 
-    try {
-      const payload = {
-        label: formLabel.trim(),
-        source_type: formSourceType,
-        rtsp_url: formSourceType === "rtsp" ? formRtspUrl.trim() : null,
-        webcam_device_id: formSourceType === "webcam" ? formWebcamDeviceId : null,
-        camera_index: null, // Always keep NULL in database for both client webcam and rtsp
-      };
+    const payload: Record<string, any> = {
+      label: formLabel.trim(),
+      source_type: formSourceType,
+      rtsp_url: formSourceType === "rtsp" ? formRtspUrl.trim() : null,
+      webcam_device_id: formSourceType === "webcam" ? formWebcamDeviceId : null,
+      camera_index: null, // Always keep NULL in database for both client webcam and rtsp
+    };
 
-      if (editingCamId) {
-        await apiFetch(API.myCamerasDetail(editingCamId), {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-      } else {
-        await apiFetch(API.myCameras(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
+    // Helper: perform the actual fetch and handle the confirmable 422 flow.
+    const doSave = async (forceSave = false): Promise<void> => {
+      if (forceSave) payload.force_save = true;
+
+      const url = editingCamId ? API.myCamerasDetail(editingCamId) : API.myCameras();
+      const method = editingCamId ? "PUT" : "POST";
+
+      // Use raw fetch so we can inspect 422 confirmable responses before throwing.
+      const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: "include",
+        cache: "no-store",
+        body: JSON.stringify(payload),
+      });
+
+      const body = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        // 422 with confirmable=true → URL changed but RTSP unreachable.
+        // Ask the user if they still want to save.
+        if (res.status === 422 && body?.confirmable && editingCamId) {
+          const confirmed = window.confirm(
+            `⚠️ Peringatan Koneksi RTSP\n\n${body.message}\n\nTetap simpan URL ini?`
+          );
+          if (confirmed) {
+            return doSave(true); // retry with force_save=true
+          }
+          // User cancelled — restore banner to previous state
+          setBanner("disconnected");
+          setBannerMsg("Penyimpanan dibatalkan.");
+          return;
+        }
+        // All other errors: surface the server message.
+        throw new Error(body?.message ?? `Error ${res.status}`);
       }
+    };
 
+    try {
+      await doSave();
       setBanner("connected");
       setBannerMsg(editingCamId ? "Kamera berhasil diperbarui." : "Kamera berhasil ditambahkan.");
       handleResetForm();
@@ -770,12 +810,65 @@ export default function CameraSettingsPage() {
 
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={isSpinning}>
-                    Simpan
-                  </button>
-                  <button type="button" className="btn btn-outline" onClick={handleTestForm} disabled={isSpinning} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <Wifi size={13} /> Test
-                  </button>
+                  {/* Simpan disabled untuk kamera RTSP baru yang belum di-test.
+                      Untuk edit: jika URL tidak berubah, testSuccess tidak wajib. */}
+                  {(() => {
+                    const isCreatingRtsp = !editingCamId && formSourceType === "rtsp";
+                    const isEditingRtspUrlChanged =
+                      !!editingCamId &&
+                      formSourceType === "rtsp" &&
+                      formRtspUrl.trim() !== originalRtspUrl;
+                    const needsTest = isCreatingRtsp || isEditingRtspUrlChanged;
+                    const saveBlocked = isCreatingRtsp && !testSuccess; // strict only for create
+                    return (
+                      <>
+                        <button
+                          type="submit"
+                          className="btn btn-primary"
+                          style={{ flex: 1, opacity: saveBlocked ? 0.45 : 1 }}
+                          disabled={isSpinning || saveBlocked}
+                          title={saveBlocked ? "Jalankan Test terlebih dahulu untuk kamera RTSP baru." : undefined}
+                        >
+                          Simpan
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline"
+                          onClick={handleTestForm}
+                          disabled={isSpinning}
+                          style={{ display: "flex", alignItems: "center", gap: 4 }}
+                        >
+                          <Wifi size={13} /> Test
+                        </button>
+                        {saveBlocked && (
+                          <div
+                            style={{
+                              gridColumn: "1 / -1",
+                              fontSize: "11px",
+                              color: "var(--color-text-muted)",
+                              marginTop: 2,
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            ℹ️ Kamera RTSP baru harus lolos Test sebelum bisa disimpan.
+                          </div>
+                        )}
+                        {needsTest && !saveBlocked && !testSuccess && (
+                          <div
+                            style={{
+                              gridColumn: "1 / -1",
+                              fontSize: "11px",
+                              color: "var(--color-text-muted)",
+                              marginTop: 2,
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            ⚠️ URL RTSP berubah — disarankan Test ulang sebelum simpan.
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 {editingCamId && (
                   <button type="button" className="btn btn-ghost" onClick={handleResetForm} disabled={isSpinning}>

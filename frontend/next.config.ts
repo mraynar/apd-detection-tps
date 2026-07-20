@@ -1,6 +1,16 @@
 import type { NextConfig } from "next";
 
+// BACKEND_URL_INTERNAL: server-side URL used by Next.js rewrites (not exposed to browser).
+// - Development (lokal): tidak perlu di-set, fallback ke http://localhost:5001.
+// - Docker: di-set ke http://backend:5001 (nama service di docker-compose).
+const BACKEND_INTERNAL =
+  process.env.BACKEND_URL_INTERNAL ?? "http://localhost:5001";
+
 const nextConfig: NextConfig = {
+  // standalone output diperlukan untuk Docker multi-stage build.
+  // Output berupa server.js + minimal deps, bukan full node_modules.
+  output: "standalone",
+
   images: {
     remotePatterns: [
       {
@@ -17,15 +27,16 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:5001/api/:path*",
+        destination: `${BACKEND_INTERNAL}/api/:path*`,
       },
       {
         source: "/video_feed",
-        destination: "http://localhost:5001/video_feed",
+        destination: `${BACKEND_INTERNAL}/video_feed`,
       },
     ];
   },

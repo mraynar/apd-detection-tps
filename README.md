@@ -466,10 +466,119 @@ cv2.VideoCapture), ini yang benar-benar dipakai untuk deteksi APD. Kamera ini
 membutuhkan izin akses kamera macOS untuk proses backend, terpisah dari izin
 kamera Safari atau Chrome.
 
+
 ---
 
 ## Requirements
 
-- Python 3.11 atau lebih baru (sudah diuji di versi 3.14)
-- Node.js 18 LTS atau lebih baru (untuk frontend Next.js)
-- PostgreSQL 14 atau lebih baru (untuk autentikasi dan riwayat pelanggaran)
+- Python 3.11+ (dites di 3.14)
+- Node.js 18+ LTS (frontend Next.js)
+- PostgreSQL 14+ / Supabase Cloud (auth & riwayat pelanggaran)
+
+---
+
+## 🐳 Deploy via Docker
+
+Containerization ditujukan untuk **deployment ke server produksi** — bukan menggantikan development lokal (`start.sh` tetap dipakai untuk dev/debug harian di macOS).
+
+### Prasyarat
+
+- Docker Engine 24+ dan Docker Compose v2 (`docker compose`, bukan `docker-compose`)
+- File model YOLO sudah ada di `models-archive/` (tidak di-push ke git karena ukuran besar — salin manual ke server)
+
+### Langkah 1 — Siapkan file `.env`
+
+**Backend:**
+```bash
+cp backend/.env.docker.example backend/.env
+nano backend/.env   # isi DATABASE_URL (Supabase) dan CORS_ORIGINS
+```
+
+Isi minimal:
+```env
+DATABASE_URL=postgresql://postgres.PROJ_REF:PASSWORD@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres
+CORS_ORIGINS=http://YOUR_SERVER_IP:3000
+```
+
+**Frontend:**
+```bash
+cp frontend/.env.docker.example frontend/.env.local
+nano frontend/.env.local   # isi IP server
+```
+
+Isi:
+```env
+NEXT_PUBLIC_BACKEND_URL=http://YOUR_SERVER_IP:5001
+```
+
+> [!IMPORTANT]
+> `NEXT_PUBLIC_BACKEND_URL` harus berisi IP/domain yang dapat dijangkau dari **browser pengguna**, bukan nama service Docker internal. Contoh: `http://192.168.1.100:5001`.
+
+### Langkah 2 — Edit `NEXT_PUBLIC_BACKEND_URL` di docker-compose.yml
+
+Buka `docker-compose.yml` dan ubah baris berikut di bagian `frontend.build.args`:
+
+```yaml
+NEXT_PUBLIC_BACKEND_URL: http://YOUR_SERVER_IP:5001
+```
+
+Ganti `YOUR_SERVER_IP` dengan IP nyata server Anda.
+
+### Langkah 3 — Build dan jalankan
+
+```bash
+docker compose up -d --build
+```
+
+Build pertama memerlukan waktu **10–20 menit** (install PyTorch + ultralytics ~2 GB).
+Build berikutnya jauh lebih cepat karena Docker layer cache.
+
+### Cek status
+
+```bash
+# Status semua container
+docker compose ps
+
+# Health check backend
+curl http://localhost:5001/health
+
+# Akses frontend
+open http://localhost:3000
+```
+
+### Lihat log
+
+```bash
+# Log backend (streaming)
+docker compose logs -f backend
+
+# Log frontend
+docker compose logs -f frontend
+
+# Log backend, 50 baris terakhir saja
+docker compose logs --tail=50 backend
+```
+
+### Stop / restart
+
+```bash
+# Stop semua container (data tidak hilang)
+docker compose down
+
+# Stop + hapus volumes anonim (jika ada)
+docker compose down -v
+
+# Restart satu service saja (misal setelah update kode backend)
+docker compose up -d --build backend
+```
+
+### Catatan Arsitektur Docker
+
+| Aspek | Keterangan |
+|---|---|
+| Kamera | Produksi RTSP only — tidak ada device passthrough webcam |
+| Database | Supabase Cloud — tidak perlu PostgreSQL lokal di server |
+| Model YOLO | Di-mount sebagai volume read-only (`./models-archive:/app/models-archive:ro`) |
+| Log | Di-mount ke `./logs/` (host), bisa di-tail dari luar container |
+| Backend URL (internal) | `http://backend:5001` — nama service Docker, untuk Next.js rewrites |
+| Backend URL (browser) | IP/domain server — harus diisi sebelum build frontend |

@@ -75,9 +75,20 @@ print(f"[INFO] Using inference device: {DEVICE}")
 load_dotenv()
 
 app = Flask(__name__)
-# Enable CORS for Next.js frontend with credentials support
+
+# ---- CORS -------------------------------------------------------------------
+# CORS_ORIGINS (env): comma-separated list of additional allowed origins.
+# Example (production): CORS_ORIGINS=http://192.168.1.100:3000,https://apd.tps.co.id
+# Localhost origins are always included as a fallback for development.
+_cors_origins_env = os.environ.get("CORS_ORIGINS", "")
+_cors_extra = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+_cors_origins = list(dict.fromkeys(
+    _cors_extra + ["http://localhost:3000", "http://127.0.0.1:3000"]
+))
+print(f"[INFO] CORS origins: {_cors_origins}")
+
 CORS(app, resources={r"/*": {
-    "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+    "origins": _cors_origins,
     "allow_headers": ["Authorization", "Content-Type", "Cookie"]
 }}, supports_credentials=True)
 
@@ -1664,6 +1675,20 @@ def api_my_cameras_post():
         rtsp_url = data.get("rtsp_url", "").strip()
         if not rtsp_url:
             return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
+
+        # Strict RTSP connectivity check before persisting.
+        # Kamera RTSP hanya disimpan jika koneksi berhasil — cegah URL tidak valid masuk DB.
+        res = _test_rtsp_with_timeout(rtsp_url)
+        if not res["success"]:
+            return jsonify({
+                "success": False,
+                "connection_status": res["connection_status"],
+                "message": (
+                    f"Kamera tidak disimpan — koneksi RTSP gagal: {res['message']} "
+                    "Pastikan URL benar dan kamera dapat dijangkau dari server."
+                ),
+            }), 422
+
         camera_index = None
         webcam_device_id = None
         use_rtsp = True
@@ -1715,7 +1740,36 @@ def api_my_cameras_put(id):
         
     if cam.owner_user_id != user_id and role != "admin":
         return jsonify({"success": False, "message": "Akses ditolak. Anda bukan pemilik kamera ini."}), 403
-        
+
+    # ---- Pre-flight RTSP test (before touching DB) ----
+    # Resolved source type after this update (if source_type not in payload, keep current).
+    resolved_source_type = data["source_type"].lower() if "source_type" in data else cam.source_type
+    candidate_rtsp_url = data.get("rtsp_url", "").strip() if "rtsp_url" in data else (cam.rtsp_url or "")
+
+    # Only test if: (a) type will be RTSP, (b) rtsp_url is in the payload and actually changed.
+    rtsp_url_changing = (
+        resolved_source_type == "rtsp"
+        and "rtsp_url" in data
+        and candidate_rtsp_url != (cam.rtsp_url or "")
+    )
+    if rtsp_url_changing and not data.get("force_save", False):
+        if not candidate_rtsp_url:
+            return jsonify({"success": False, "message": "URL RTSP tidak boleh kosong untuk tipe RTSP."}), 400
+        res = _test_rtsp_with_timeout(candidate_rtsp_url)
+        if not res["success"]:
+            # confirmable=True → frontend dapat menawarkan dialog konfirmasi "Simpan tetap?"
+            # Jika user setuju, frontend kirim ulang request dengan force_save=True.
+            return jsonify({
+                "success": False,
+                "confirmable": True,
+                "connection_status": res["connection_status"],
+                "message": (
+                    f"URL RTSP baru tidak dapat dijangkau: {res['message']} "
+                    "Ingin tetap menyimpan URL ini?"
+                ),
+            }), 422
+
+    # ---- Validate & apply fields ----
     if "label" in data:
         label = data.get("label", "").strip()
         if not label:

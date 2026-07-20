@@ -263,7 +263,7 @@ $hasFailure = $RESULTS | Where-Object { $_.Status -eq "GAGAL" }
 if ($hasFailure) {
     Write-Host "Setup belum selesai. Perbaiki item GAGAL di atas, lalu jalankan ulang." -ForegroundColor Red
 } else {
-    Write-Host "✅ Setup selesai!" -ForegroundColor Green
+    Write-Host "Setup selesai!" -ForegroundColor Green
     Write-Host ""
     Write-Host "Langkah selanjutnya:" -ForegroundColor Cyan
     Write-Host "  1. Pastikan backend\.env sudah diisi (DATABASE_URL)" -ForegroundColor White

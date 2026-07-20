@@ -1,0 +1,71 @@
+# ==============================================================================
+# docker-compose.yml — APD Detection System (Production)
+#
+# ASUMSI PRODUKSI:
+#   Semua kamera adalah RTSP (network stream dari CCTV IP).
+#   Tidak ada webcam hardware yang dipassthrough ke container backend.
+#   Jika webcam lokal dibutuhkan di masa depan, tambahkan blok 'devices:'
+#   ke service backend (contoh: devices: ["/dev/video0:/dev/video0"])
+#   dan rebuild image.
+#
+# CARA PAKAI:
+#   1. Salin backend/.env.docker.example   → backend/.env    (isi DATABASE_URL, CORS_ORIGINS)
+#   2. Salin frontend/.env.docker.example  → frontend/.env.local  (isi NEXT_PUBLIC_BACKEND_URL)
+#   3. Edit NEXT_PUBLIC_BACKEND_URL di bawah (bagian args build frontend) → IP server Anda
+#   4. Jalankan: docker compose up -d --build
+# ==============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Backend: Flask + YOLOv8 + Waitress
+  # --------------------------------------------------------------------------
+  backend:
+    build:
+      # Build context adalah root repo agar Dockerfile bisa COPY backend/ dan models-archive/
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "5001:5001"
+    # Kredensial dan konfigurasi dibaca dari file .env — TIDAK hardcode di sini.
+    # DATABASE_URL wajib berisi Supabase connection string lengkap.
+    env_file:
+      - backend/.env
+    volumes:
+      # Model YOLO (besar, ~500 MB+) di-mount sebagai volume read-only.
+      # Path /app/models-archive diperlukan oleh app.py (relative: ../models-archive/).
+      - ./models-archive:/app/models-archive:ro
+      # Folder runs/ untuk model chinstrap (opsional, read-only)
+      - ./runs:/app/runs:ro
+      # Log backend — persist ke host agar bisa di-tail dari luar container.
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # beri waktu model YOLO load (bisa 30-60 detik)
+
+  # --------------------------------------------------------------------------
+  # Frontend: Next.js Standalone
+  # --------------------------------------------------------------------------
+  frontend:
+    build:
+      context: frontend
+      args:
+        # NEXT_PUBLIC_BACKEND_URL: URL backend yang dapat dijangkau dari BROWSER pengguna.
+        # Ganti ke IP/hostname server Anda sebelum build.
+        # Contoh: http://192.168.1.100:5001
+        NEXT_PUBLIC_BACKEND_URL: ${NEXT_PUBLIC_BACKEND_URL:-http://localhost:5001}
+        # BACKEND_URL_INTERNAL: dipakai oleh Next.js server-side rewrites di dalam container.
+        # Menggunakan nama service Docker — tidak perlu diubah.
+        BACKEND_URL_INTERNAL: http://backend:5001
+    ports:
+      - "3000:3000"
+    env_file:
+      - frontend/.env.local
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
