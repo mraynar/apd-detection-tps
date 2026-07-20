@@ -850,7 +850,7 @@ export default function CameraSettingsPage() {
                               lineHeight: 1.4,
                             }}
                           >
-                            ℹ️ Kamera RTSP baru harus lolos Test sebelum bisa disimpan.
+                             Kamera RTSP baru harus lolos Test sebelum bisa disimpan.
                           </div>
                         )}
                         {needsTest && !saveBlocked && !testSuccess && (
