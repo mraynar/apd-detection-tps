@@ -601,13 +601,15 @@ export default function LiveMonitoringPage() {
               </div>
             </div>
             <div style={{
-              background: "#000",
+              background: "#090d16",
               position: "relative",
               minHeight: "360px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               overflow: "hidden",
+              borderBottomLeftRadius: "var(--radius-md)",
+              borderBottomRightRadius: "var(--radius-md)",
             }}>
               {backendReachable === false ? (
                 <div style={{ textAlign: "center", color: "rgba(255,255,255,0.5)", padding: "40px" }}>
