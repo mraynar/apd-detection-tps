@@ -622,9 +622,17 @@ export default function CameraSettingsPage() {
                 <BannerIcon size={16} style={{ flexShrink: 0, animation: isSpinning ? "spin 1s linear infinite" : undefined }} />
                 <div>
                   <div style={{ fontWeight: 600, fontSize: "13px" }}>{bannerTitle(banner)}</div>
-                  <div style={{ fontSize: "12px", marginTop: 2, opacity: 0.85 }}>
-                    {bannerMsg}
-                    {latency !== null && ` (latensi: ${latency} ms)`}
+                  <div style={{ fontSize: "12px", marginTop: 2, opacity: 0.85, display: "flex", alignItems: "center", flexWrap: "wrap", gap: "6px" }}>
+                    <span>{bannerMsg}</span>
+                    {latency !== null && (
+                      <span className="badge badge-success" style={{
+                        fontSize: "10px", padding: "2px 6px", fontWeight: 700,
+                        display: "inline-flex", alignItems: "center", gap: "4px"
+                      }}>
+                        <span className="dot" style={{ width: 4, height: 4, background: "#22c55e", borderRadius: "50%" }} />
+                        {latency} ms
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
