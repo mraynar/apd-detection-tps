@@ -60,16 +60,7 @@ export default function LoginPage() {
   const resilienceWidth = Math.round((44 * resilienceLogo.width) / resilienceLogo.height);
 
   return (
-    <div style={{
-      display: "flex",
-      flexDirection: "column",
-      minHeight: "100vh",
-      background: "linear-gradient(135deg, #16324F 0%, #3273B7 100%)",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: "24px",
-      fontFamily: "'Inter', sans-serif"
-    }}>
+    <div className="login-container">
       {/* Logos Container */}
       <div style={{
         display: "flex",
@@ -91,21 +82,12 @@ export default function LoginPage() {
       </div>
 
       {/* Login Card */}
-      <div style={{
-        width: "100%",
-        maxWidth: "420px",
-        background: "rgba(255, 255, 255, 0.98)",
-        borderRadius: "16px",
-        boxShadow: "0 20px 40px rgba(0, 0, 0, 0.3)",
-        padding: "36px 32px",
-        display: "flex",
-        flexDirection: "column"
-      }}>
+      <div className="login-card">
         <div style={{ marginBottom: "28px" }}>
-          <h2 style={{ fontSize: "20px", fontWeight: 800, color: "#16324F", letterSpacing: "-0.5px" }}>
+          <h2 className="login-title" style={{ color: "var(--color-text-primary)" }}>
             Operations Portal
           </h2>
-          <p style={{ fontSize: "13.5px", color: "#6B7280", marginTop: "4px" }}>
+          <p style={{ fontSize: "13.5px", color: "var(--color-text-secondary)", marginTop: "4px" }}>
             Silakan masuk dengan akun TPS Anda
           </p>
         </div>
@@ -146,12 +128,7 @@ export default function LoginPage() {
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="Masukkan username..."
                 disabled={submitting}
-                style={{
-                  width: "100%", height: "42px", padding: "0 12px 0 38px",
-                  borderRadius: "8px", border: "1.5px solid #E5E7EB", outline: "none",
-                  fontSize: "14px", transition: "all 0.15s ease",
-                  background: "#FFFFFF", color: "#111827"
-                }}
+                className="login-input"
               />
             </div>
           </div>
@@ -172,12 +149,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
                 disabled={submitting}
-                style={{
-                  width: "100%", height: "42px", padding: "0 12px 0 38px",
-                  borderRadius: "8px", border: "1.5px solid #E5E7EB", outline: "none",
-                  fontSize: "14px", transition: "all 0.15s ease",
-                  background: "#FFFFFF", color: "#111827"
-                }}
+                className="login-input"
               />
             </div>
           </div>
@@ -186,13 +158,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={submitting}
-            style={{
-              height: "44px", width: "100%", background: "#3273B7", color: "#FFFFFF",
-              borderRadius: "8px", border: "none", fontSize: "14px", fontWeight: 700,
-              cursor: submitting ? "not-allowed" : "pointer", marginTop: "8px",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-              boxShadow: "0 4px 12px rgba(50, 115, 183, 0.25)", transition: "all 0.15s ease"
-            }}
+            className="login-btn"
           >
             {submitting ? (
               <>
