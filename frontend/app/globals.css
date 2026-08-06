@@ -1103,3 +1103,20 @@ tbody td {
   height: 32px;
   background: rgba(255, 255, 255, 0.15);
 }
+
+.nav-logout {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  margin-top: 8px;
+  padding-top: 14px !important;
+  color: rgba(248, 113, 113, 0.65) !important;
+}
+
+.nav-logout:hover {
+  background: rgba(239, 68, 68, 0.08) !important;
+  color: #EF4444 !important;
+}
+
+.nav-logout:hover .nav-icon {
+  color: #EF4444 !important;
+  opacity: 1 !important;
+}

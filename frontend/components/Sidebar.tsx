@@ -129,13 +129,9 @@ export default function Sidebar() {
       <div style={{ flex: 1 }} />
 
       <button
-        className="nav-item"
+        className="nav-item nav-logout"
         onClick={handleLogout}
         style={{
-          borderTop: "1px solid rgba(255,255,255,0.08)",
-          paddingTop: "14px",
-          borderRadius: 0,
-          color: "rgba(255, 255, 255, 0.5)",
           marginBottom: "12px"
         }}
       >
