@@ -56,37 +56,50 @@ interface DetectionCategoryCardProps {
 }
 function DetectionCategoryCard({ label, icon, compliant, violations }: DetectionCategoryCardProps) {
   return (
-    <div className="stat-card">
-      <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-        {icon}
+    <div className="stat-card" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+      <div className="stat-card-label" style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700 }}>
+        <div style={{
+          width: "24px",
+          height: "24px",
+          borderRadius: "6px",
+          background: "var(--color-primary-dim)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--color-primary)",
+        }}>
+          {icon}
+        </div>
         {label}
       </div>
-      <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+      <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
         <div style={{
           flex: 1, textAlign: "center",
-          padding: "10px 8px",
+          padding: "12px 8px",
           background: "var(--color-success-dim)",
           borderRadius: "var(--radius-sm)",
-          border: "1px solid rgba(22,163,74,0.15)",
+          border: "1px solid rgba(16, 185, 129, 0.12)",
+          transition: "all 0.2s ease",
         }}>
-          <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
+          <div style={{ fontSize: "28px", fontWeight: 800, color: "var(--color-success)", lineHeight: 1 }}>
             {compliant}
           </div>
-          <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+          <div style={{ fontSize: "9.5px", fontWeight: 700, color: "var(--color-success)", marginTop: "6px", textTransform: "uppercase", letterSpacing: "0.6px" }}>
             Patuh
           </div>
         </div>
         <div style={{
           flex: 1, textAlign: "center",
-          padding: "10px 8px",
+          padding: "12px 8px",
           background: "var(--color-danger-dim)",
           borderRadius: "var(--radius-sm)",
-          border: "1px solid rgba(220,38,38,0.15)",
+          border: "1px solid rgba(239, 68, 68, 0.12)",
+          transition: "all 0.2s ease",
         }}>
-          <div style={{ fontSize: "26px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
+          <div style={{ fontSize: "28px", fontWeight: 800, color: "var(--color-danger)", lineHeight: 1 }}>
             {violations}
           </div>
-          <div style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-danger)", marginTop: "4px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+          <div style={{ fontSize: "9.5px", fontWeight: 700, color: "var(--color-danger)", marginTop: "6px", textTransform: "uppercase", letterSpacing: "0.6px" }}>
             Pelanggaran
           </div>
         </div>
