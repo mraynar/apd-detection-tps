@@ -555,13 +555,13 @@ export default function UserManagementPage() {
             <div className="card-body">
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
                 <div style={{
-                  background: "var(--color-warning-dim)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "16px",
-                  border: "1px solid rgba(245,158,11,0.2)",
+                  background: "rgba(245, 158, 11, 0.04)",
+                  borderRadius: "var(--radius-md)",
+                  padding: "20px",
+                  border: "1px solid rgba(245, 158, 11, 0.15)",
                 }}>
-                  <div style={{ fontWeight: 700, fontSize: "13px", color: "var(--color-warning)", marginBottom: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
-                    <Shield size={13} /> Admin
+                  <div style={{ fontWeight: 800, fontSize: "13px", color: "#D97706", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    <Shield size={14} /> Admin
                   </div>
                   <ul style={{ fontSize: "12px", color: "var(--color-text-secondary)", lineHeight: 2, margin: 0, paddingLeft: "16px" }}>
                     <li>Live Monitoring & kendali kamera</li>
@@ -572,13 +572,13 @@ export default function UserManagementPage() {
                   </ul>
                 </div>
                 <div style={{
-                  background: "var(--color-success-dim)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "16px",
-                  border: "1px solid rgba(22,163,74,0.2)",
+                  background: "rgba(37, 99, 235, 0.04)",
+                  borderRadius: "var(--radius-md)",
+                  padding: "20px",
+                  border: "1px solid rgba(37, 99, 235, 0.15)",
                 }}>
-                  <div style={{ fontWeight: 700, fontSize: "13px", color: "var(--color-success)", marginBottom: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
-                    <Users size={13} /> User (Operator)
+                  <div style={{ fontWeight: 800, fontSize: "13px", color: "var(--color-primary)", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    <Users size={14} /> User (Operator)
                   </div>
                   <ul style={{ fontSize: "12px", color: "var(--color-text-secondary)", lineHeight: 2, margin: 0, paddingLeft: "16px" }}>
                     <li>Violation History (view only)</li>
