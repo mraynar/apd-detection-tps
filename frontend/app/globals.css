@@ -390,15 +390,20 @@ input, select, textarea { font-family: inherit; }
 .btn {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 16px;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 18px;
   border-radius: var(--radius-sm);
   font-size: 13.5px;
   font-weight: 600;
   border: none;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
   white-space: nowrap;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
 }
 
 .btn-primary {
@@ -407,8 +412,8 @@ input, select, textarea { font-family: inherit; }
 }
 
 .btn-primary:hover {
-  background: color-mix(in srgb, var(--color-primary) 82%, black);
-  box-shadow: 0 4px 12px rgba(50,115,183,0.35);
+  background: var(--color-primary-light);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3);
   transform: translateY(-1px);
 }
 
@@ -429,8 +434,9 @@ input, select, textarea { font-family: inherit; }
 }
 
 .btn-danger:hover {
-  background: #b91c1c;
-  box-shadow: 0 4px 12px rgba(220,38,38,0.35);
+  background: #DC2626;
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.3);
+  transform: translateY(-1px);
 }
 
 .btn-ghost {
@@ -440,8 +446,9 @@ input, select, textarea { font-family: inherit; }
 }
 
 .btn-ghost:hover {
-  background: var(--color-bg);
+  background: var(--color-border-light);
   color: var(--color-text-primary);
+  border-color: var(--color-text-muted);
 }
 
 .btn-sm {
