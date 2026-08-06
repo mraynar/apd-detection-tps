@@ -625,10 +625,27 @@ export default function LiveMonitoringPage() {
               borderBottomRightRadius: "var(--radius-md)",
             }}>
               {backendReachable === false ? (
-                <div style={{ textAlign: "center", color: "rgba(255,255,255,0.5)", padding: "40px" }}>
-                  <WifiOff size={40} style={{ marginBottom: "12px", opacity: 0.4 }} />
-                  <p style={{ fontSize: "14px", marginBottom: "6px" }}>Backend tidak dapat dijangkau</p>
-                  <p style={{ fontSize: "12px", opacity: 0.6 }}>Jalankan: <code>python app.py</code> di folder backend/</p>
+                <div style={{
+                  position: "absolute", inset: 0,
+                  background: "radial-gradient(circle at center, #1e293b 0%, #090d16 100%)",
+                  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                  padding: "40px", textAlign: "center"
+                }}>
+                  <WifiOff size={44} style={{ marginBottom: "16px", color: "#EF4444", opacity: 0.85, animation: "pulse-dot 2s infinite" }} />
+                  <p style={{ fontSize: "15px", fontWeight: 700, color: "#FFFFFF", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    Backend Tidak Dapat Dijangkau
+                  </p>
+                  <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.6)", maxWidth: "320px", lineHeight: "1.6" }}>
+                    Pastikan server deteksi sudah aktif dengan menjalankan perintah:
+                    <code style={{
+                      display: "block", marginTop: "10px", padding: "6px 12px",
+                      background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "var(--radius-sm)", color: "var(--color-primary-light)",
+                      fontSize: "12px", fontFamily: "monospace"
+                    }}>
+                      python app.py
+                    </code>
+                  </p>
                 </div>
               ) : mounted ? (
                 isRtspActive ? (
