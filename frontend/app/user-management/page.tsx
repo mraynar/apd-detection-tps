@@ -523,12 +523,16 @@ export default function UserManagementPage() {
                             <button
                               className="btn btn-outline btn-sm"
                               onClick={() => setModal({ type: "edit", user: u })}
-                              style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "12px" }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: "5px", fontSize: "12px",
+                                borderColor: "var(--color-border)",
+                                color: "var(--color-primary)"
+                              }}
                             >
                               <Pencil size={12} /> Edit
                             </button>
                             <button
-                              className="btn btn-danger btn-sm"
+                              className="btn btn-outline-danger btn-sm"
                               onClick={() => setModal({ type: "delete", user: u })}
                               style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "12px" }}
                             >

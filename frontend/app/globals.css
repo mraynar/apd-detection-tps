@@ -463,6 +463,18 @@ input, select, textarea { font-family: inherit; }
   transform: translateY(-1px);
 }
 
+.btn-outline-danger {
+  background: transparent;
+  color: var(--color-danger);
+  border: 1.5px solid rgba(239, 68, 68, 0.2);
+}
+
+.btn-outline-danger:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-danger);
+  transform: translateY(-1px);
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--color-text-secondary);
