@@ -180,16 +180,17 @@ input, select, textarea { font-family: inherit; }
   color: rgba(255,255,255,0.65);
   font-size: 13.5px;
   font-weight: 500;
-  transition: all 0.15s ease;
+  transition: all 0.2s ease;
   cursor: pointer;
   border: none;
   background: none;
   width: 100%;
   text-align: left;
+  position: relative;
 }
 
 .nav-item:hover {
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.05);
   color: white;
 }
 
@@ -197,6 +198,17 @@ input, select, textarea { font-family: inherit; }
   background: var(--color-sidebar-active);
   color: #ffffff;
   font-weight: 600;
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  background-color: var(--color-primary-light);
+  border-radius: 4px;
 }
 
 .nav-item.active .nav-icon {
