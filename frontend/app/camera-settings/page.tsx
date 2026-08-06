@@ -5,7 +5,7 @@ import PageShell from "@/components/PageShell";
 import { API, apiFetch } from "@/lib/api";
 import {
   Camera, CheckCircle, XCircle, Loader,
-  Wifi, RefreshCw, Edit2, Play, Trash2, User
+  Wifi, RefreshCw, Edit2, Play, Trash2, User, Link, Video
 } from "lucide-react";
 
 // ---- Types ----
@@ -776,7 +776,9 @@ export default function CameraSettingsPage() {
 
               {formSourceType === "rtsp" ? (
                 <div>
-                  <label className="form-label" style={{ marginBottom: 4 }}>Alamat RTSP URL</label>
+                  <label className="form-label" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <Link size={13} style={{ color: "var(--color-primary-light)" }} /> Alamat RTSP URL
+                  </label>
                   <input
                     className="form-input"
                     type="text"
@@ -789,7 +791,9 @@ export default function CameraSettingsPage() {
                 </div>
               ) : (
                 <div>
-                  <label className="form-label" style={{ marginBottom: 4 }}>Pilih Kamera Lokal (Browser)</label>
+                  <label className="form-label" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <Video size={13} style={{ color: "var(--color-primary-light)" }} /> Pilih Kamera Lokal (Browser)
+                  </label>
                   <select
                     className="form-select"
                     value={formWebcamDeviceId}
