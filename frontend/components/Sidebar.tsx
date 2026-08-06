@@ -77,31 +77,34 @@ export default function Sidebar() {
 
       {username && (
         <div style={{
-          padding: "6px 12px",
+          padding: "10px 14px",
           display: "flex",
           alignItems: "center",
-          gap: "8px",
-          background: "rgba(255, 255, 255, 0.08)",
-          borderRadius: "8px",
-          margin: "4px 0 12px",
+          gap: "10px",
+          background: "rgba(255, 255, 255, 0.04)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: "10px",
+          margin: "8px 0 16px",
+          transition: "background 0.2s ease",
         }}>
           <div style={{
-            width: "24px",
-            height: "24px",
+            width: "32px",
+            height: "32px",
             borderRadius: "50%",
-            background: "rgba(255,255,255,0.2)",
+            background: "linear-gradient(135deg, var(--color-primary-light), var(--color-primary))",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: "11px",
+            fontSize: "13px",
             fontWeight: 700,
-            color: "white"
+            color: "white",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
           }}>
             {username.charAt(0).toUpperCase()}
           </div>
-          <div>
-            <div style={{ fontSize: "12px", fontWeight: 600, color: "white" }}>{username}</div>
-            <div style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.4)", textTransform: "capitalize" }}>{userRole}</div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ fontSize: "13px", fontWeight: 600, color: "#FFFFFF", lineHeight: 1.2 }}>{username}</div>
+            <div style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.4)", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: "3px", fontWeight: 700 }}>{userRole}</div>
           </div>
         </div>
       )}
