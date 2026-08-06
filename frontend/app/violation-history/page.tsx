@@ -5,7 +5,7 @@ import PageShell from "@/components/PageShell";
 import { API, apiFetch } from "@/lib/api";
 import {
   Search, Download, AlertTriangle, ChevronLeft, ChevronRight,
-  Eye, Filter
+  Eye, Filter, Calendar
 } from "lucide-react";
 
 interface Violation {
@@ -113,8 +113,7 @@ export default function ViolationHistoryPage() {
             {/* Search */}
             <div className="form-group" style={{ flex: "1 1 220px" }}>
               <label className="form-label">
-                <Search size={11} style={{ display: "inline", marginRight: 4 }} />
-                Cari (Kamera / Tipe)
+                Pencarian
               </label>
               <div style={{ position: "relative" }}>
                 <Search size={14} style={{
@@ -151,7 +150,10 @@ export default function ViolationHistoryPage() {
 
             {/* Date filter */}
             <div className="form-group" style={{ flex: "1 1 160px" }}>
-              <label className="form-label">Tanggal</label>
+              <label className="form-label">
+                <Calendar size={11} style={{ display: "inline", marginRight: 4 }} />
+                Tanggal
+              </label>
               <input
                 className="form-input"
                 type="date"
