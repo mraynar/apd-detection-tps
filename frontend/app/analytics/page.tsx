@@ -269,7 +269,7 @@ export default function AnalyticsPage() {
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                   <span style={{ fontSize: 13, color: "var(--color-text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
                     Chinstrap
-                    <span className="badge badge-neutral" style={{ fontSize: "10px", padding: "1px 7px" }}>
+                    <span className="badge badge-warning" style={{ fontSize: "9px", padding: "2px 8px", textTransform: "uppercase", fontWeight: 700 }}>
                       Coming Soon
                     </span>
                   </span>
