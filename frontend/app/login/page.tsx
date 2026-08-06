@@ -62,22 +62,9 @@ export default function LoginPage() {
   return (
     <div className="login-container">
       {/* Logos Container */}
-      <div style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        width: "100%",
-        maxWidth: "420px",
-        marginBottom: "28px",
-        background: "rgba(255, 255, 255, 0.08)",
-        padding: "16px 20px",
-        borderRadius: "12px",
-        backdropFilter: "blur(8px)",
-        WebkitBackdropFilter: "blur(8px)",
-        border: "1px solid rgba(255, 255, 255, 0.1)"
-      }}>
+      <div className="login-logo-container">
         <Image src={tpsLogo} alt="TPS Logo" width={tpsWidth} height={44} priority />
-        <div style={{ width: "1px", height: "30px", background: "rgba(255, 255, 255, 0.2)" }} />
+        <div className="login-logo-divider" />
         <Image src={resilienceLogo} alt="Resilience Logo" width={resilienceWidth} height={44} priority />
       </div>
 
