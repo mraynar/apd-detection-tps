@@ -288,9 +288,14 @@ export default function ViolationHistoryPage() {
                         </td>
                         <td>
                           <button
-                            className="btn btn-ghost btn-sm"
+                            className="btn btn-outline btn-sm"
                             title="Lihat Detail"
-                            style={{ padding: "4px 8px" }}
+                            style={{
+                              padding: "4px 8px",
+                              height: "auto",
+                              borderColor: "var(--color-border)",
+                              color: "var(--color-primary)"
+                            }}
                             onClick={() => alert(`Detail pelanggaran:\nID: ${v.id}\nLabel: ${v.label}\nConfidence: ${conf}%\nWaktu: ${formatDateTime(v.timestamp)}\nKamera: ${v.camera_source}`)}
                           >
                             <Eye size={14} />
