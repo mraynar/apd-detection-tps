@@ -34,17 +34,19 @@ function ConfirmDeleteModal({
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 1000,
-      background: "rgba(0,0,0,0.5)",
+      background: "rgba(15, 23, 42, 0.4)",
       display: "flex", alignItems: "center", justifyContent: "center",
-      backdropFilter: "blur(4px)",
+      backdropFilter: "blur(8px)",
+      WebkitBackdropFilter: "blur(8px)",
       padding: "16px",
     }}>
       <div style={{
         background: "var(--color-surface)",
-        borderRadius: "var(--radius-md)",
-        padding: "24px",
+        borderRadius: "var(--radius-lg)",
+        padding: "28px",
         maxWidth: "400px", width: "100%",
         boxShadow: "var(--shadow-lg)",
+        border: "1px solid var(--color-border-light)",
         display: "flex", flexDirection: "column", gap: "16px",
       }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
@@ -109,17 +111,19 @@ function EditUserModal({
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 1000,
-      background: "rgba(0,0,0,0.5)",
+      background: "rgba(15, 23, 42, 0.4)",
       display: "flex", alignItems: "center", justifyContent: "center",
-      backdropFilter: "blur(4px)",
+      backdropFilter: "blur(8px)",
+      WebkitBackdropFilter: "blur(8px)",
       padding: "16px",
     }}>
       <div style={{
         background: "var(--color-surface)",
-        borderRadius: "var(--radius-md)",
-        padding: "24px",
+        borderRadius: "var(--radius-lg)",
+        padding: "28px",
         maxWidth: "420px", width: "100%",
         boxShadow: "var(--shadow-lg)",
+        border: "1px solid var(--color-border-light)",
         display: "flex", flexDirection: "column", gap: "20px",
       }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
