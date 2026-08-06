@@ -782,16 +782,27 @@ tbody td {
 }
 
 .metric-value-chip {
-  padding: 3px 10px;
-  border-radius: 20px;
-  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
   font-weight: 700;
-  color: white;
 }
 
-.chip-blue { background: var(--color-primary); }
-.chip-gray { background: var(--color-text-secondary); }
-.chip-red { background: var(--color-danger); }
+.chip-blue {
+  background: var(--color-primary-dim);
+  color: var(--color-primary);
+  border: 1px solid rgba(37, 99, 235, 0.15);
+}
+.chip-gray {
+  background: #F1F5F9;
+  color: #475569;
+  border: 1px solid #E2E8F0;
+}
+.chip-red {
+  background: var(--color-danger-dim);
+  color: var(--color-danger);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
 
 /* ====== DETECTION FEED ITEM ====== */
 .detection-item {
