@@ -679,15 +679,7 @@ export default function CameraSettingsPage() {
                     return (
                       <div
                         key={cam.id}
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          padding: "8px 10px",
-                          borderRadius: "var(--radius-sm)",
-                          background: isActive ? "var(--color-primary-dim)" : "var(--color-bg-alt, #f8f9fa)",
-                          border: isActive ? "1px solid var(--color-primary)" : "1px solid var(--color-border-light, #e9ecef)",
-                        }}
+                        className={`camera-list-item ${isActive ? "active" : ""}`}
                       >
                         <div style={{ minWidth: 0, flex: 1, marginRight: 8 }}>
                           <div style={{ fontSize: "12.5px", fontWeight: 600, display: "flex", alignItems: "center", gap: 4, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>

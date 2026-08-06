@@ -1130,3 +1130,25 @@ tbody td {
   color: #EF4444 !important;
   opacity: 1 !important;
 }
+
+.camera-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.camera-list-item:hover {
+  border-color: var(--color-text-muted);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.camera-list-item.active {
+  background: var(--color-primary-dim);
+  border-color: var(--color-primary);
+}
