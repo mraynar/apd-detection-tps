@@ -205,15 +205,18 @@ export default function AnalyticsPage() {
                     />
                     <Tooltip
                       contentStyle={{
-                        background: "var(--color-surface)",
+                        background: "rgba(255, 255, 255, 0.95)",
                         border: "1px solid var(--color-border)",
-                        borderRadius: "var(--radius-sm)",
+                        borderRadius: "var(--radius-md)",
+                        boxShadow: "var(--shadow-md)",
                         fontSize: 12,
+                        backdropFilter: "blur(4px)",
+                        WebkitBackdropFilter: "blur(4px)",
                       }}
                     />
                     <Legend wrapperStyle={{ fontSize: 12, paddingTop: 12 }} />
-                    <Bar dataKey="total_activity" name="Total Aktivitas" fill="#4A90D9" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="violations" name="Pelanggaran" fill="#DC2626" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="total_activity" name="Total Aktivitas" fill="#3B82F6" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="violations" name="Pelanggaran" fill="#EF4444" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
