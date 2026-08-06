@@ -844,7 +844,7 @@ export default function LiveMonitoringPage() {
                 disabled={backendReachable === false}
               >
                 {isDetecting ? (
-                  <><PauseCircle size={15} /> Pause Detection</>
+                  <><PauseCircle size={15} style={{ animation: "pulse-dot 1.5s infinite" }} /> Pause Detection</>
                 ) : (
                   <><PlayCircle size={15} /> Resume Detection</>
                 )}
