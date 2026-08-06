@@ -889,18 +889,35 @@ tbody td {
   border: 1.5px solid var(--color-border);
   background: var(--color-surface);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.page-btn:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-dim); }
-.page-btn.active { background: var(--color-primary); border-color: var(--color-primary); color: white; }
-.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-dim);
+  transform: translateY(-1px);
+}
+
+.page-btn.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, 0.25);
+}
+
+.page-btn:disabled {
+  background: var(--color-border-light);
+  border-color: var(--color-border-light);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
 
 /* ====== EMPTY STATE ====== */
 .empty-state {
