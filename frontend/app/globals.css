@@ -529,7 +529,7 @@ input, select, textarea { font-family: inherit; }
   background: var(--color-border);
   border-radius: 24px;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .toggle-slider::before {
@@ -541,14 +541,14 @@ input, select, textarea { font-family: inherit; }
   top: 3px;
   background: white;
   border-radius: 50%;
-  transition: transform 0.2s;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
 }
 
 .toggle input:checked + .toggle-slider { background: var(--color-primary); }
 .toggle input:checked + .toggle-slider::before { transform: translateX(20px); }
 
-.toggle-label { font-size: 13.5px; font-weight: 500; color: var(--color-text-primary); }
+.toggle-label { font-size: 13.5px; font-weight: 600; color: var(--color-text-primary); }
 
 /* ====== STAT CARD ====== */
 .stat-card {
