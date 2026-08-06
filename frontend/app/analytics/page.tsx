@@ -88,7 +88,7 @@ export default function AnalyticsPage() {
         {/* ===== 3 Summary Cards ===== */}
         <div className="grid-3">
           {/* Total Deteksi Hari Ini */}
-          <div className="stat-card">
+          <div className="stat-card" style={{ borderTop: "4px solid var(--color-primary)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
                 <div className="stat-card-label">
@@ -111,7 +111,7 @@ export default function AnalyticsPage() {
           </div>
 
           {/* Total Pelanggaran Hari Ini */}
-          <div className="stat-card">
+          <div className="stat-card" style={{ borderTop: "4px solid var(--color-danger)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
                 <div className="stat-card-label">
@@ -134,7 +134,7 @@ export default function AnalyticsPage() {
           </div>
 
           {/* Compliance Rate */}
-          <div className="stat-card">
+          <div className="stat-card" style={{ borderTop: "4px solid var(--color-success)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
                 <div className="stat-card-label">
