@@ -475,10 +475,11 @@ input, select, textarea { font-family: inherit; }
   font-size: 13.5px;
   color: var(--color-text-primary);
   background: var(--color-surface);
-  transition: border-color 0.15s;
+  transition: border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   outline: none;
 }
 
+.form-input:hover { border-color: var(--color-text-muted); }
 .form-input:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-dim); }
 .form-input:disabled { background: var(--color-bg); color: var(--color-text-muted); cursor: not-allowed; }
 
@@ -490,7 +491,7 @@ input, select, textarea { font-family: inherit; }
   font-size: 13.5px;
   color: var(--color-text-primary);
   background: var(--color-surface);
-  transition: border-color 0.15s;
+  transition: border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   outline: none;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
@@ -500,6 +501,7 @@ input, select, textarea { font-family: inherit; }
   cursor: pointer;
 }
 
+.form-select:hover { border-color: var(--color-text-muted); }
 .form-select:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-dim); }
 
 /* Toggle switch */
