@@ -654,16 +654,22 @@ export default function LiveMonitoringPage() {
                         position: "absolute",
                         top: 12,
                         right: 12,
-                        background: "rgba(245,158,11,0.95)",
+                        background: "rgba(217, 119, 6, 0.9)",
+                        backdropFilter: "blur(4px)",
+                        WebkitBackdropFilter: "blur(4px)",
+                        border: "1px solid rgba(251, 191, 36, 0.3)",
                         color: "white",
                         padding: "6px 12px",
-                        borderRadius: "6px",
+                        borderRadius: "var(--radius-sm)",
                         fontSize: "11px",
-                        fontWeight: "bold",
+                        fontWeight: 700,
                         zIndex: 10,
-                        boxShadow: "0 2px 4px rgba(0,0,0,0.3)",
+                        boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
                       }}>
-                        ⚠️ Menggunakan Kamera Cadangan (Kamera Utama Tidak Tersedia)
+                        <span>⚠️ Menggunakan Kamera Cadangan</span>
                       </div>
                     )}
                   </div>
@@ -677,17 +683,26 @@ export default function LiveMonitoringPage() {
               {!isDetecting && backendReachable && (
                 <div style={{
                   position: "absolute",
-                  top: "12px",
-                  left: "12px",
-                  background: "rgba(245,158,11,0.9)",
+                  top: 12,
+                  left: 12,
+                  background: "rgba(15, 23, 42, 0.8)",
+                  backdropFilter: "blur(4px)",
+                  WebkitBackdropFilter: "blur(4px)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
                   color: "white",
-                  padding: "4px 10px",
-                  borderRadius: "6px",
-                  fontSize: "12px",
+                  padding: "6px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  fontSize: "11px",
                   fontWeight: 700,
                   zIndex: 2,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  letterSpacing: "0.5px",
                 }}>
-                  ⏸ DETEKSI DIJEDA
+                  <PauseCircle size={12} style={{ color: "var(--color-warning)" }} />
+                  <span>DETEKSI DIJEDA</span>
                 </div>
               )}
             </div>
