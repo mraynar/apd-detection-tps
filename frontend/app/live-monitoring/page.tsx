@@ -850,9 +850,10 @@ export default function LiveMonitoringPage() {
                 )}
               </button>
               <button
-                className="btn btn-ghost w-full"
+                className="btn btn-outline w-full"
                 onClick={exportSnapshot}
                 disabled={backendReachable === false}
+                style={{ border: "1.5px solid var(--color-border)", color: "var(--color-text-primary)" }}
               >
                 <Download size={15} /> Export Snapshot
               </button>
