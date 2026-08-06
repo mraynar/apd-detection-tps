@@ -697,10 +697,10 @@ tbody td {
 }
 
 /* ====== SCROLLBAR ====== */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 6px; }
-::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--color-border-light); }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; border: 2px solid var(--color-border-light); }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
 /* ====== ANIMATIONS ====== */
 @keyframes pulse-dot {
